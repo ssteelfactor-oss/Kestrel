@@ -1,9 +1,0 @@
-﻿  KestrelACL.C
-  main.c
-  Создание кода...
-C:\Users\user\source\repos\Kestrel\code\main.c(347,9): warning C4013: StringCchPrintfW: нет определения; предполагается "extern" с возвратом типа "int"
-C:\Users\user\source\repos\Kestrel\code\main.c(467,9): warning C4013: StringCchCopyW: нет определения; предполагается "extern" с возвратом типа "int"
-main.obj : error LNK2019: ссылка на неразрешенный внешний символ StringCchCopyW в функции KestrelWalkDacl.
-odbccp32.lib(dllload.obj) : error LNK2019: ссылка на неразрешенный внешний символ _vsnwprintf_s в функции StringCchPrintfW.
-MSVCRTD.lib(exe_main.obj) : error LNK2019: ссылка на неразрешенный внешний символ main в функции "int __cdecl invoke_main(void)" (?invoke_main@@YAHXZ).
-C:\Users\user\source\repos\Kestrel\x64\Debug\Kestrel.exe : fatal error LNK1120: неразрешенных внешних элементов: 3

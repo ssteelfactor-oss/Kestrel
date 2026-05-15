@@ -1,0 +1,17 @@
+﻿.vs/
+x64/
+Debug/
+Release/
+Kestrel/x64/
+*.obj
+*.pdb
+*.idb
+*.ilk
+*.exe
+*.log
+*.tlog
+*.ipch
+*.db
+*.vsidx
+*.suo
+*.backup.json
