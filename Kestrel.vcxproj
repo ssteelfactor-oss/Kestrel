@@ -127,6 +127,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="code\adws_scan.c" />
     <ClCompile Include="code\KestrelACL.C" />
     <ClCompile Include="code\main.c" />
   </ItemGroup>
