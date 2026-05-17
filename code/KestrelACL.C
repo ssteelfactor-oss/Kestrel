@@ -315,6 +315,10 @@ KestrelFreeACLScanResult(
 /*  Implementation stubs                                                       */
 /* ─────────────────────────────────────────────────────────────────────────── */
 
+/*
+ * KestrelBuildExtendedRightsTable — Phase 1 implementation.
+ */
+
 _Must_inspect_result_
 HRESULT
 KestrelBuildExtendedRightsTable(
@@ -322,27 +326,151 @@ KestrelBuildExtendedRightsTable(
     _Outptr_result_maybenull_
     KESTREL_EXTENDED_RIGHT** ppRightsHead)
 {
-    HRESULT                hr = S_OK;
+    HRESULT                  hr = S_OK;
     IDirectorySearch* pSearch = NULL;
-    ADS_SEARCH_HANDLE      hSearch = NULL;
+    ADS_SEARCH_HANDLE        hSearch = NULL;
     KESTREL_EXTENDED_RIGHT* pHead = NULL;
-    WCHAR                  wszPath[512];
+    KESTREL_EXTENDED_RIGHT** ppTail = &pHead; /* build list in order */
+    WCHAR                    wszPath[512];
+    DWORD                    cTotal = 0;
 
     if (!pwszConfigNC || !ppRightsHead) return E_INVALIDARG;
     *ppRightsHead = NULL;
 
-    /* Build LDAP path to CN=Extended-Rights */
-    if (FAILED(StringCchPrintfW(wszPath, ARRAYSIZE(wszPath),
-        L"LDAP://CN=Extended-Rights,%s", pwszConfigNC)))
-        return E_UNEXPECTED;
+    /* ── 1. Bind IDirectorySearch to CN=Extended-Rights ─────────────── */
+    hr = StringCchPrintfW(wszPath, ARRAYSIZE(wszPath),
+        L"LDAP://CN=Extended-Rights,%s", pwszConfigNC);
+    if (FAILED(hr)) return hr;
 
-    /* TODO: ADsGetObject → IDirectorySearch */
-    /* TODO: SetSearchPreference (SCOPE_ONELEVEL, PAGESIZE=200) */
-    /* TODO: ExecuteSearch with filter "(objectClass=controlAccessRight)" */
-    /* TODO: loop GetNextRow → GetColumn(rightsGuid/displayName/appliesTo) */
-    /* TODO: allocate and link KESTREL_EXTENDED_RIGHT per row             */
+    hr = ADsGetObject(wszPath, &IID_IDirectorySearch, (void**)&pSearch);
+    if (FAILED(hr)) {
+        wprintf(L"  [!] KestrelBuildExtendedRightsTable: ADsGetObject failed 0x%08X\n", hr);
+        return hr;
+    }
+
+    /* ── 2. Set preferences: ONELEVEL scope, paged ───────────────────── */
+    ADS_SEARCHPREF_INFO prefs[2];
+
+    prefs[0].dwSearchPref = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_ONELEVEL; /* direct children only */
+
+    prefs[1].dwSearchPref = ADS_SEARCHPREF_PAGESIZE;
+    prefs[1].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[1].vValue.Integer = 200;
+
+    hr = pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 2);
+    if (FAILED(hr)) goto Cleanup;
+
+    /* ── 3. Execute search ───────────────────────────────────────────── */
+    LPWSTR attrs[] = { L"rightsGuid", L"displayName", L"appliesTo" };
+
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+        L"(objectClass=controlAccessRight)",
+        attrs, ARRAYSIZE(attrs),
+        &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    /* ── 4. Walk rows, build linked list ─────────────────────────────── */
+    while (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+
+        ADS_SEARCH_COLUMN colGuid = { 0 };
+        ADS_SEARCH_COLUMN colName = { 0 };
+        ADS_SEARCH_COLUMN colApplies = { 0 };
+
+        BOOL bGotGuid = FALSE;
+        BOOL bGotName = FALSE;
+        BOOL bGotAppl = FALSE;
+
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+            L"rightsGuid", &colGuid)) &&
+            colGuid.dwNumValues > 0 &&
+            colGuid.pADsValues[0].dwType == ADSTYPE_CASE_IGNORE_STRING)
+            bGotGuid = TRUE;
+
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+            L"displayName", &colName)) &&
+            colName.dwNumValues > 0 &&
+            colName.pADsValues[0].dwType == ADSTYPE_CASE_IGNORE_STRING)
+            bGotName = TRUE;
+
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+            L"appliesTo", &colApplies)) &&
+            colApplies.dwNumValues > 0)
+            bGotAppl = TRUE;
+
+        /* rightsGuid is mandatory — skip entries without it */
+        if (!bGotGuid) goto NextRow;
+
+        /* ── Allocate entry ─────────────────────────────────────────── */
+        KESTREL_EXTENDED_RIGHT* pEntry = (KESTREL_EXTENDED_RIGHT*)HeapAlloc(
+            GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(KESTREL_EXTENDED_RIGHT));
+        if (!pEntry) { hr = E_OUTOFMEMORY; goto NextRow; }
+
+        /*
+         * rightsGuid comes from LDAP as bare UUID string without braces:
+         * "ab721a52-1e2f-11d0-9819-00aa0040529b"
+         *
+         * KestrelGuidToString produces {XXXXXXXX-...} form.
+         * Store WITH braces so KestrelLookupExtendedRight can match directly.
+         * _wcsicmp handles case difference.
+         */
+        StringCchPrintfW(pEntry->wszGuid, ARRAYSIZE(pEntry->wszGuid),
+            L"{%s}", colGuid.pADsValues[0].CaseIgnoreString);
+
+        if (bGotName)
+            StringCchCopyW(pEntry->wszDisplayName, ARRAYSIZE(pEntry->wszDisplayName),
+                colName.pADsValues[0].CaseIgnoreString);
+
+        /* ── appliesTo: multi-valued schema class GUIDs ─────────────── */
+        if (bGotAppl) {
+            pEntry->cAppliesTo = colApplies.dwNumValues;
+            pEntry->rgwszAppliesTo = (LPWSTR*)HeapAlloc(GetProcessHeap(),
+                HEAP_ZERO_MEMORY,
+                colApplies.dwNumValues * sizeof(LPWSTR));
+
+            if (pEntry->rgwszAppliesTo) {
+                for (DWORD i = 0; i < colApplies.dwNumValues; i++) {
+                    if (colApplies.pADsValues[i].dwType != ADSTYPE_CASE_IGNORE_STRING)
+                        continue;
+
+                    LPCWSTR pwszVal = colApplies.pADsValues[i].CaseIgnoreString;
+                    SIZE_T  cch = wcslen(pwszVal) + 1;
+
+                    pEntry->rgwszAppliesTo[i] = (LPWSTR)HeapAlloc(
+                        GetProcessHeap(), 0, cch * sizeof(WCHAR));
+
+                    if (pEntry->rgwszAppliesTo[i])
+                        StringCchCopyW(pEntry->rgwszAppliesTo[i], cch, pwszVal);
+                }
+            }
+        }
+
+        /* ── Append to tail (preserves LDAP order) ──────────────────── */
+        *ppTail = pEntry;
+        ppTail = &pEntry->pNext;
+        cTotal++;
+
+    NextRow:
+        if (bGotGuid)  pSearch->lpVtbl->FreeColumn(pSearch, &colGuid);
+        if (bGotName)  pSearch->lpVtbl->FreeColumn(pSearch, &colName);
+        if (bGotAppl)  pSearch->lpVtbl->FreeColumn(pSearch, &colApplies);
+    }
+
+    wprintf(L"  [*] Extended Rights table: %lu entries\n", cTotal);
 
     *ppRightsHead = pHead;
+    pHead = NULL;   /* ownership transferred to caller */
+
+Cleanup:
+    if (hSearch && pSearch)
+        pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)
+        pSearch->lpVtbl->Release(pSearch);
+    /* pHead != NULL only if we hit E_OUTOFMEMORY mid-loop */
+    if (pHead)
+        KestrelFreeExtendedRightsTable(pHead);
+
     return hr;
 }
 
@@ -358,29 +486,97 @@ KestrelLookupExtendedRight(
     }
     return NULL;
 }
+/*
+ * KestrelGetObjectSecurityDescriptor — Phase 2 implementation.
+ *
+ * Design note:
+ *   IDirectoryObject::GetObjectAttributes allocates pAttrInfo via ADSI.
+ *   The raw SD lives inside pAttrInfo->pADsValues[0].ProviderSpecific.lpValue.
+ *   We copy it into a HeapAlloc'd buffer and free pAttrInfo before returning.
+ *   Caller owns *ppSD and must HeapFree it when done.
+ */
 
 _Must_inspect_result_
 HRESULT
 KestrelGetObjectSecurityDescriptor(
-    _In_            IDirectoryObject* pDirObj,
-    _Outptr_        PSECURITY_DESCRIPTOR* ppSD,
-    _Out_           DWORD* pcbSD)
+    _In_        IDirectoryObject* pDirObj,
+    _Outptr_    PSECURITY_DESCRIPTOR* ppSD,
+    _Out_       DWORD* pcbSD)
 {
     HRESULT         hr = S_OK;
     ADS_ATTR_INFO* pAttrInfo = NULL;
     DWORD           cAttrs = 0;
-    LPWSTR          rgszAttrs[] = { L"nTSecurityDescriptor" };
+    PSECURITY_DESCRIPTOR pSdCopy = NULL;
 
     if (!pDirObj || !ppSD || !pcbSD) return E_INVALIDARG;
     *ppSD = NULL;
     *pcbSD = 0;
 
-    /* TODO: pDirObj->lpVtbl->GetObjectAttributes(pDirObj, rgszAttrs, 1, &pAttrInfo, &cAttrs) */
-    /* TODO: verify cAttrs == 1 && pAttrInfo[0].pADsValues->dwType == ADSTYPE_PROV_SPECIFIC */
-    /* TODO: extract lpValue / dwLength from ADS_PROV_SPECIFIC */
-    /* TODO: *ppSD = (PSECURITY_DESCRIPTOR)pAttrInfo[0].pADsValues->ProviderSpecific.lpValue */
-    /* TODO: *pcbSD = pAttrInfo[0].pADsValues->ProviderSpecific.dwLength */
-    /* Note: caller frees pAttrInfo via FreeADsMem; *ppSD is a pointer into pAttrInfo */
+    LPWSTR rgszAttrs[] = { L"nTSecurityDescriptor" };
+
+    /* ── 1. Retrieve nTSecurityDescriptor via IDirectoryObject ────────── */
+    hr = pDirObj->lpVtbl->GetObjectAttributes(pDirObj,
+        rgszAttrs, 1,
+        &pAttrInfo, &cAttrs);
+
+    if (FAILED(hr)) goto Cleanup;
+
+    if (cAttrs == 0 || !pAttrInfo) {
+        hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        goto Cleanup;
+    }
+
+    /* ── 2. Locate the nTSecurityDescriptor attribute ─────────────────── */
+    ADS_ATTR_INFO* pSD_Attr = NULL;
+
+    for (DWORD i = 0; i < cAttrs; i++) {
+        if (_wcsicmp(pAttrInfo[i].pszAttrName, L"nTSecurityDescriptor") == 0) {
+            pSD_Attr = &pAttrInfo[i];
+            break;
+        }
+    }
+
+    if (!pSD_Attr || pSD_Attr->dwNumValues == 0) {
+        hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        goto Cleanup;
+    }
+
+    /* ── 3. Verify type and extract raw SD bytes ──────────────────────── */
+    ADS_PROV_SPECIFIC* pProvSpec = &pSD_Attr->pADsValues[0].ProviderSpecific;
+
+    if (pSD_Attr->pADsValues[0].dwType != ADSTYPE_PROV_SPECIFIC ||
+        !pProvSpec->lpValue || pProvSpec->dwLength == 0) {
+        hr = E_UNEXPECTED;
+        goto Cleanup;
+    }
+
+    /* ── 4. Copy SD into HeapAlloc buffer — caller owns this memory ───── */
+    pSdCopy = (PSECURITY_DESCRIPTOR)HeapAlloc(GetProcessHeap(), 0,
+        pProvSpec->dwLength);
+    if (!pSdCopy) {
+        hr = E_OUTOFMEMORY;
+        goto Cleanup;
+    }
+
+    CopyMemory(pSdCopy, pProvSpec->lpValue, pProvSpec->dwLength);
+
+    /* ── 5. Quick sanity check before handing off ─────────────────────── */
+    if (!IsValidSecurityDescriptor(pSdCopy)) {
+        HeapFree(GetProcessHeap(), 0, pSdCopy);
+        pSdCopy = NULL;
+        hr = E_UNEXPECTED;
+        goto Cleanup;
+    }
+
+    *ppSD = pSdCopy;
+    *pcbSD = pProvSpec->dwLength;
+    pSdCopy = NULL;  /* ownership transferred */
+
+Cleanup:
+    /* pAttrInfo allocated by ADSI — must use FreeADsMem, not HeapFree */
+    if (pAttrInfo) FreeADsMem(pAttrInfo);
+    /* pSdCopy != NULL only if we hit an error after HeapAlloc */
+    if (pSdCopy)   HeapFree(GetProcessHeap(), 0, pSdCopy);
 
     return hr;
 }
@@ -455,7 +651,14 @@ KestrelWalkDacl(
         StringCchCopyW(edge.wszTargetDN, ARRAYSIZE(edge.wszTargetDN), pwszTargetDN);
         StringCchCopyW(edge.wszObjectClass, ARRAYSIZE(edge.wszObjectClass), pwszObjectClass);
 
-        /* TODO: ConvertSidToStringSidW(pTrusteeSid, &pwszSid) → edge.wszTrusteeSid */
+        LPWSTR pwszSid = NULL;
+        if (ConvertSidToStringSidW(pTrusteeSid, &pwszSid) && pwszSid) {
+            StringCchCopyW(edge.wszTrusteeSid, ARRAYSIZE(edge.wszTrusteeSid), pwszSid);
+            LocalFree(pwszSid);
+        }
+        else {
+            StringCchCopyW(edge.wszTrusteeSid, ARRAYSIZE(edge.wszTrusteeSid), L"(invalid SID)");
+        }
 
         if (pObjectType && (edgeType == EDGE_EXTENDED_RIGHT || edgeType == EDGE_WRITE_PROPERTY)) {
             KestrelGuidToString(pObjectType, edge.wszRightGuid, ARRAYSIZE(edge.wszRightGuid));
@@ -464,12 +667,47 @@ KestrelWalkDacl(
                 StringCchCopyW(edge.wszRightName, ARRAYSIZE(edge.wszRightName), pRight->wszDisplayName);
         }
 
-        HRESULT hr = KestrelACLResultAppend(pResult, &edge);
-        if (FAILED(hr)) return hr;
+        HRESULT hr = KestrelACLResultAppend( pResult, & edge );
+        if ( FAILED(hr) ) return hr;
     }
 
     return S_OK;
 }
+_Must_inspect_result_
+static HRESULT
+KestrelGetConfigNC(
+    _Out_writes_z_(cchBuf) LPWSTR pwszBuf,
+    _In_                   SIZE_T cchBuf)
+{
+    HRESULT  hr = S_OK;
+    IADs* pRootDSE = 0;
+    VARIANT  var = { 0 };
+
+    VariantInit( & var );
+
+    hr = ADsGetObject(L"LDAP://rootDSE", &IID_IADs, (void**)&pRootDSE);
+    if (FAILED(hr)) goto Cleanup;
+
+    hr = pRootDSE->lpVtbl->Get(pRootDSE, L"configurationNamingContext", &var);
+    if (FAILED(hr)) goto Cleanup;
+
+    if (var.vt != VT_BSTR || !var.bstrVal) {
+        hr = E_UNEXPECTED;
+        goto Cleanup;
+    }
+
+    hr = StringCchCopyW(pwszBuf, cchBuf, var.bstrVal);
+
+Cleanup:
+    VariantClear(&var);
+    if (pRootDSE) pRootDSE->lpVtbl->Release(pRootDSE);
+    return hr;
+}
+
+
+/* ═════════════════════════════════════════════════════════════════════════
+ * PART B — KestrelScanACLEdges
+ * ═════════════════════════════════════════════════════════════════════════ */
 
 _Must_inspect_result_
 HRESULT
@@ -484,51 +722,216 @@ KestrelScanACLEdges(
     IDirectorySearch* pSearch = NULL;
     ADS_SEARCH_HANDLE        hSearch = NULL;
     WCHAR                    wszPath[512];
+    WCHAR                    wszConfigNC[512];
 
-    if (!pwszDomainNC || !pwszConfigNC || !ppResult) return E_INVALIDARG;
+    if (!pwszDomainNC || !ppResult) return E_INVALIDARG;
     *ppResult = NULL;
 
-    /* Allocate result container */
+    /* ── 1. Allocate result container ────────────────────────────────── */
     pResult = (KESTREL_ACL_SCAN_RESULT*)HeapAlloc(GetProcessHeap(),
         HEAP_ZERO_MEMORY,
         sizeof(*pResult));
     if (!pResult) return E_OUTOFMEMORY;
 
-    /* Phase 1: Extended Rights table */
-    hr = KestrelBuildExtendedRightsTable(pwszConfigNC, &pRights);
-    if (FAILED(hr)) goto Cleanup;
+    /* ── 2. Resolve configNC if caller didn't supply it ──────────────── */
+    if (pwszConfigNC && *pwszConfigNC != L'\0') {
+        StringCchCopyW(wszConfigNC, ARRAYSIZE(wszConfigNC), pwszConfigNC);
+    }
+    else {
+        hr = KestrelGetConfigNC(wszConfigNC, ARRAYSIZE(wszConfigNC));
+        if (FAILED(hr)) {
+            wprintf(L"  [!] Failed to resolve configurationNamingContext: 0x%08X\n", hr);
+            goto Cleanup;
+        }
+    }
 
-    /* Build LDAP root path */
-    if (FAILED(StringCchPrintfW(wszPath, ARRAYSIZE(wszPath),
-        L"LDAP://%s", pwszDomainNC))) {
-        hr = E_UNEXPECTED;
+    /* ── 3. Phase 1: build Extended Rights table ──────────────────────── */
+    wprintf(L"  [*] Building Extended Rights table...\n");
+    hr = KestrelBuildExtendedRightsTable(wszConfigNC, &pRights);
+    if (FAILED(hr)) {
+        wprintf(L"  [!] KestrelBuildExtendedRightsTable failed: 0x%08X\n", hr);
         goto Cleanup;
     }
 
-    /* TODO: ADsGetObject(wszPath, IID_IDirectorySearch, &pSearch) */
-    /* TODO: SetSearchPreference:
-             ADS_SEARCHPREF_SEARCH_SCOPE = ADS_SCOPE_SUBTREE
-             ADS_SEARCHPREF_PAGESIZE     = 200
-             ADS_SEARCHPREF_SECURITY_MASK = (OWNER_SECURITY_INFORMATION |
-                                             GROUP_SECURITY_INFORMATION |
-                                             DACL_SECURITY_INFORMATION) */
-                                             /* TODO: ExecuteSearch(KESTREL_ACL_FILTER, g_rgszObjectAttrs, KESTREL_OBJECT_ATTR_COUNT, &hSearch) */
+    /* ── 4. Bind IDirectorySearch to domain root ──────────────────────── */
+    hr = StringCchPrintfW(wszPath, ARRAYSIZE(wszPath),
+        L"LDAP://%s", pwszDomainNC);
+    if (FAILED(hr)) goto Cleanup;
 
-                                             /* TODO: loop: GetNextRow → GetColumn(distinguishedName/objectClass/objectSid/nTSecurityDescriptor)
-                                                      → ADsOpenObject(DN, IID_IDirectoryObject, &pDirObj)
-                                                      → KestrelGetObjectSecurityDescriptor
-                                                      → GetSecurityDescriptorDacl
-                                                      → KestrelWalkDacl
-                                                      → pResult->cObjectsScanned++ / cObjectsErrored++ */
+    hr = ADsGetObject(wszPath, &IID_IDirectorySearch, (void**)&pSearch);
+    if (FAILED(hr)) {
+        wprintf(L"  [!] ADsGetObject failed: 0x%08X\n", hr);
+        goto Cleanup;
+    }
+
+    /* ── 5. Set search preferences ────────────────────────────────────── */
+    ADS_SEARCHPREF_INFO prefs[3];
+
+    prefs[0].dwSearchPref = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_SUBTREE;
+
+    prefs[1].dwSearchPref = ADS_SEARCHPREF_PAGESIZE;
+    prefs[1].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[1].vValue.Integer = KESTREL_LDAP_PAGESIZE;
+
+    /*
+     * ADS_SEARCHPREF_SECURITY_MASK — CRITICAL.
+     * Without this, nTSecurityDescriptor is returned empty.
+     * 0x7 = OWNER | GROUP | DACL
+     */
+    prefs[2].dwSearchPref = ADS_SEARCHPREF_SECURITY_MASK;
+    prefs[2].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[2].vValue.Integer = 0x7;
+
+    hr = pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 3);
+    if (FAILED(hr)) goto Cleanup;
+
+    /* ── 6. Execute search ────────────────────────────────────────────── */
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+        KESTREL_ACL_FILTER,
+        (LPWSTR*)g_rgszObjectAttrs,
+        KESTREL_OBJECT_ATTR_COUNT,
+        &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    wprintf(L"  [*] Scanning ACL edges...\n\n");
+    wprintf(L"  %-50s %-20s %-18s %s\n",
+        L"Target DN", L"Trustee SID", L"Edge Type", L"Right");
+    wprintf(L"  %s\n",
+        L"------------------------------------------------------------------------------------"
+        L"--------------------");
+
+    /* ── 7. Main loop: per-object SD fetch + DACL walk ───────────────── */
+    while (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+
+        ADS_SEARCH_COLUMN colDN = { 0 };
+        ADS_SEARCH_COLUMN colClass = { 0 };
+        BOOL bGotDN = FALSE;
+        BOOL bGotClass = FALSE;
+
+        WCHAR wszDN[512] = { 0 };
+        WCHAR wszClass[64] = { 0 };
+        WCHAR wszObjPath[600] = { 0 };
+
+        /* ── Get distinguishedName ─────────────────────────────────── */
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+            L"distinguishedName", &colDN)) &&
+            colDN.dwNumValues > 0 &&
+            colDN.pADsValues[0].dwType == ADSTYPE_DN_STRING) {
+            StringCchCopyW(wszDN, ARRAYSIZE(wszDN),
+                colDN.pADsValues[0].DNString);
+            bGotDN = TRUE;
+            pSearch->lpVtbl->FreeColumn(pSearch, &colDN);
+        }
+
+        /* ── Get objectClass (last = most specific) ────────────────── */
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+            L"objectClass", &colClass)) &&
+            colClass.dwNumValues > 0) {
+            DWORD iLast = colClass.dwNumValues - 1;
+            if (colClass.pADsValues[iLast].dwType == ADSTYPE_CASE_IGNORE_STRING)
+                StringCchCopyW(wszClass, ARRAYSIZE(wszClass),
+                    colClass.pADsValues[iLast].CaseIgnoreString);
+            bGotClass = TRUE;
+            pSearch->lpVtbl->FreeColumn(pSearch, &colClass);
+        }
+
+        if (!bGotDN) {
+            pResult->cObjectsErrored++;
+            continue;
+        }
+
+        if (!bGotClass)
+            StringCchCopyW(wszClass, ARRAYSIZE(wszClass), L"unknown");
+
+        /* ── Build LDAP path for IDirectoryObject bind ─────────────── */
+        if (FAILED(StringCchPrintfW(wszObjPath, ARRAYSIZE(wszObjPath),
+            L"LDAP://%s", wszDN))) {
+            pResult->cObjectsErrored++;
+            continue;
+        }
+
+        /* ── Phase 2: bind IDirectoryObject, get SD ───────────────── */
+        IDirectoryObject* pDirObj = NULL;
+        PSECURITY_DESCRIPTOR pSD = NULL;
+        DWORD                cbSD = 0;
+
+        HRESULT hrObj = ADsGetObject(wszObjPath,
+            &IID_IDirectoryObject, (void**)&pDirObj);
+        if (FAILED(hrObj)) {
+            pResult->cObjectsErrored++;
+            continue;
+        }
+
+        hrObj = KestrelGetObjectSecurityDescriptor(pDirObj, &pSD, &cbSD);
+        pDirObj->lpVtbl->Release(pDirObj);
+
+        if (FAILED(hrObj) || !pSD) {
+            pResult->cObjectsErrored++;
+            continue;
+        }
+
+        /* ── Phase 3: extract DACL, walk ACEs ─────────────────────── */
+        PACL  pDacl = NULL;
+        BOOL  bDaclPresent = FALSE;
+        BOOL  bDefault = FALSE;
+
+        if (GetSecurityDescriptorDacl(pSD, &bDaclPresent, &pDacl, &bDefault) &&
+            bDaclPresent && pDacl) {
+            hrObj = KestrelWalkDacl(pDacl, wszDN, wszClass, pRights, pResult);
+            if (FAILED(hrObj))
+                pResult->cObjectsErrored++;
+        }
+
+        HeapFree(GetProcessHeap(), 0, pSD);
+        pResult->cObjectsScanned++;
+    }
+
+    /* ── 8. Print collected edges ─────────────────────────────────────── */
+    static const LPCWSTR rgszEdgeNames[] = {
+        L"UNKNOWN",
+        L"GenericAll",
+        L"WriteDACL",
+        L"WriteOwner",
+        L"GenericWrite",
+        L"ExtendedRight",
+        L"WriteProperty",
+        L"CreateChild",
+        L"DeleteChild",
+        L"Self"
+    };
+
+    for (DWORD i = 0; i < pResult->cEdges; i++) {
+        KESTREL_ACL_EDGE* pE = &pResult->rgEdges[i];
+
+        LPCWSTR pwszType = (pE->EdgeType < ARRAYSIZE(rgszEdgeNames))
+            ? rgszEdgeNames[pE->EdgeType] : L"?";
+
+        LPCWSTR pwszRight = (pE->wszRightName[0])
+            ? pE->wszRightName : pE->wszRightGuid;
+
+        wprintf(L"  %-50s %-20s %-18s %s%s\n",
+            pE->wszTargetDN,
+            pE->wszTrusteeSid,
+            pwszType,
+            pwszRight,
+            pE->bDeny ? L" [DENY]" : L"");
+    }
+
+    wprintf(L"\n  [*] Objects scanned: %lu  |  Edges found: %lu  |  Errors: %lu\n",
+        pResult->cObjectsScanned,
+        pResult->cEdges,
+        pResult->cObjectsErrored);
 
     *ppResult = pResult;
     pResult = NULL;   /* ownership transferred */
 
 Cleanup:
     if (hSearch && pSearch)
-        IDirectorySearch_CloseSearchHandle(pSearch, hSearch);
+        pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
     if (pSearch)
-        IDirectorySearch_Release(pSearch);
+        pSearch->lpVtbl->Release(pSearch);
     KestrelFreeExtendedRightsTable(pRights);
     if (pResult) KestrelFreeACLScanResult(pResult);
     return hr;

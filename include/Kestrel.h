@@ -29,6 +29,7 @@
 #include <adserr.h>
 #include <stdio.h>
 #include <strsafe.h>
+#include <sddl.h>       /* ConvertSidToStringSidW / ConvertStringSidToSidW */
 #include <sal.h>
 
 #pragma comment(lib, "activeds.lib")
@@ -39,6 +40,12 @@
 /* ═══════════════════════════════════════════════════════════════════════════
  * adws_scan.c — v0.1
  * ═══════════════════════════════════════════════════════════════════════════ */
+#define KESTREL_LDAP_PAGESIZE       200
+#define KESTREL_ADWS_PORT           9389
+#define KESTREL_PROBE_TIMEOUT_MS    2000
+#define KESTREL_STALE_DAYS          90
+#define KESTREL_FT_PER_DAY          (10000000ULL * 86400ULL)
+
 
 /*
  * RunADWSScan
