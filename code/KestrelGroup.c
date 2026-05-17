@@ -38,7 +38,7 @@ static LPCWSTR g_rgszHighValueGroups[] = {
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Forward declarations                                                       */
 /* ─────────────────────────────────────────────────────────────────────────── */
-/* ── Cleanup forward declarations ────────────────────────────────────── */
+
 VOID KestrelFreeMemberList(
     _In_opt_ _Post_ptr_invalid_ KESTREL_MEMBER* pHead);
 
