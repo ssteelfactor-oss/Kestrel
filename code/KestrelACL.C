@@ -15,26 +15,7 @@
  * by the caller and passed as parameters — never re-queried inside this module.
  */
 
-#define COBJMACROS
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <oleauto.h>
-#include <activeds.h>       /* ADSI COM interfaces                 */
-#include <adshlp.h>         /* ADsGetObject, ADsOpenObject         */
-#include <iads.h>           /* IDirectoryObject, IDirectorySearch  */
-#include <adserr.h>         /* HRESULT_FROM_WIN32 helpers           */
-#include <sddl.h>           /* ConvertSidToStringSidW               */
-#include <accctrl.h>        /* EXPLICIT_ACCESS, TRUSTEE             */
-#include <aclapi.h>         /* GetSecurityDescriptorDacl            */
-#include <strsafe.h>
-#include <sal.h>
-
-
-#pragma comment(lib, "strsafe.lib")    /* StringCchCopyW, StringCchPrintfW  */
-#pragma comment(lib, "activeds.lib")   /* ADsGetObject, ADsOpenObject        */
-#pragma comment(lib, "adsiid.lib")     /* IID_IDirectorySearch, IID_IADs     */
-#pragma comment(lib, "ws2_32.lib")     /* WSA, если используется             */
-#pragma comment(lib, "advapi32.lib")   /* GetAce, ConvertSidToStringSidW     */
+#include "../include/Kestrel.h"
  /* ─────────────────────────────────────────────────────────────────────────── */
  /*  Constants                                                                  */
  /* ─────────────────────────────────────────────────────────────────────────── */

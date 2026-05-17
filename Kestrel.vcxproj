@@ -130,6 +130,9 @@
     <ClCompile Include="code\KestrelACL.C" />
     <ClCompile Include="code\main.c" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="include\Kestrel.h" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
