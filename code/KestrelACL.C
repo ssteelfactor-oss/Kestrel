@@ -93,51 +93,9 @@ typedef struct _KESTREL_EXTENDED_RIGHT {
     struct _KESTREL_EXTENDED_RIGHT* pNext;
 } KESTREL_EXTENDED_RIGHT;
 
-/*
- * KESTREL_ACL_EDGE_TYPE
- * Semantic classification of an ACE into an attack-graph edge category.
- */
-typedef enum _KESTREL_ACL_EDGE_TYPE {
-    EDGE_UNKNOWN = 0,
-    EDGE_GENERIC_ALL = 1,  /* ADS_RIGHT_GENERIC_ALL or 0xF01FF     */
-    EDGE_WRITE_DACL = 2,  /* ADS_RIGHT_WRITE_DAC                  */
-    EDGE_WRITE_OWNER = 3,  /* ADS_RIGHT_ACTRL_DS_LIST_OBJECT / WRITE_OWNER */
-    EDGE_GENERIC_WRITE = 4,  /* ADS_RIGHT_GENERIC_WRITE              */
-    EDGE_EXTENDED_RIGHT = 5,  /* ADS_RIGHT_DS_CONTROL_ACCESS + GUID   */
-    EDGE_WRITE_PROPERTY = 6,  /* ADS_RIGHT_DS_WRITE_PROP + GUID       */
-    EDGE_CREATE_CHILD = 7,  /* ADS_RIGHT_DS_CREATE_CHILD            */
-    EDGE_DELETE_CHILD = 8,  /* ADS_RIGHT_DS_DELETE_CHILD            */
-    EDGE_SELF = 9,  /* ADS_RIGHT_DS_SELF (self-write)       */
-} KESTREL_ACL_EDGE_TYPE;
 
-/*
- * KESTREL_ACL_EDGE
- * One resolved edge in the access-control graph.
- * trustee  → target, via right encoded in EdgeType + (optional) wszRightName.
- */
-typedef struct _KESTREL_ACL_EDGE {
-    WCHAR                  wszTrusteeSid[128]; /* string SID of ACE trustee        */
-    WCHAR                  wszTargetDN[512];   /* DN of the object bearing the ACE */
-    WCHAR                  wszObjectClass[64]; /* objectClass of target            */
-    KESTREL_ACL_EDGE_TYPE  EdgeType;
-    WCHAR                  wszRightName[128];  /* displayName if EDGE_EXTENDED_RIGHT/WRITE_PROP */
-    WCHAR                  wszRightGuid[64];   /* raw GUID for WRITE_PROPERTY edges */
-    BOOL                   bInherited;         /* ACE_INHERITED flag               */
-    BOOL                   bDeny;              /* ACCESS_DENIED_OBJECT_ACE_TYPE    */
-} KESTREL_ACL_EDGE;
 
-/*
- * KESTREL_ACL_SCAN_RESULT
- * Flat array of edges produced by KestrelScanACLEdges.
- * cEdges may reach tens of thousands on a large domain.
- */
-typedef struct _KESTREL_ACL_SCAN_RESULT {
-    KESTREL_ACL_EDGE* rgEdges;
-    DWORD              cEdges;
-    DWORD              cCapacity;     /* allocated slots                   */
-    DWORD              cObjectsScanned;
-    DWORD              cObjectsErrored;
-} KESTREL_ACL_SCAN_RESULT;
+
 
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Forward declarations (SAL 2.0 annotated)                                  */
