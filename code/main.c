@@ -1,35 +1,43 @@
+/*
+ * main.c — Kestrel entry point.
+ * Only wmain lives here — no scan logic.
+ */
+
 #include "../include/Kestrel.h"
 
-
-int wmain(int argc, wchar_t* argv[])
+int wmain(int argc, wchar_t *argv[])
 {
+    (void)argc; (void)argv;
+
     HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         wprintf(L"[!] CoInitializeEx failed: 0x%08X\n", hr);
         return (int)hr;
     }
 
-    /* ── Resolve rootDSE once ────────────────────────────────────────── */
-    WCHAR  wszDomainNC[512] = { 0 };
-    WCHAR  wszConfigNC[512] = { 0 };
-    IADs* pRootDSE = NULL;
+    WCHAR   wszDomainNC[512]          = { 0 };
+    WCHAR   wszConfigNC[512]          = { 0 };
+    IADs   *pRootDSE                  = NULL;
+    KESTREL_ACL_SCAN_RESULT   *pACL   = NULL;
+    KESTREL_GROUP_SCAN_RESULT *pGroup = NULL;
     VARIANT varDomain, varConfig;
     VariantInit(&varDomain);
     VariantInit(&varConfig);
 
-    hr = ADsGetObject(L"LDAP://rootDSE", &IID_IADs, (void**)&pRootDSE);
+    /* ── Resolve rootDSE once — passed to all modules ────────────────── */
+    hr = ADsGetObject(L"LDAP://rootDSE", &IID_IADs, (void **)&pRootDSE);
     if (FAILED(hr)) {
         wprintf(L"[!] rootDSE bind failed: 0x%08X\n", hr);
         goto Cleanup;
     }
 
     if (SUCCEEDED(pRootDSE->lpVtbl->Get(pRootDSE,
-        L"defaultNamingContext", &varDomain)) &&
+                L"defaultNamingContext", &varDomain)) &&
         varDomain.vt == VT_BSTR)
         StringCchCopyW(wszDomainNC, ARRAYSIZE(wszDomainNC), varDomain.bstrVal);
 
     if (SUCCEEDED(pRootDSE->lpVtbl->Get(pRootDSE,
-        L"configurationNamingContext", &varConfig)) &&
+                L"configurationNamingContext", &varConfig)) &&
         varConfig.vt == VT_BSTR)
         StringCchCopyW(wszConfigNC, ARRAYSIZE(wszConfigNC), varConfig.bstrVal);
 
@@ -37,7 +45,7 @@ int wmain(int argc, wchar_t* argv[])
     VariantClear(&varDomain);
     VariantClear(&varConfig);
 
-    /* ── v0.1: пять пассивных сканов ────────────────────────────────── */
+    /* ── v0.1: five passive AD scans ─────────────────────────────────── */
     wprintf(L"\n═══ Kestrel v0.1 — AD Passive Scan ═══\n\n");
     hr = RunADWSScan();
     if (FAILED(hr))
@@ -45,13 +53,18 @@ int wmain(int argc, wchar_t* argv[])
 
     /* ── v0.2: ACL edge extraction ───────────────────────────────────── */
     wprintf(L"\n═══ Kestrel v0.2 — ACL Edge Scan ═══\n\n");
-    KESTREL_ACL_SCAN_RESULT* pResult = NULL;
-    hr = KestrelScanACLEdges(wszDomainNC, wszConfigNC, &pResult);
+    hr = KestrelScanACLEdges(wszDomainNC, wszConfigNC, &pACL);
     if (FAILED(hr))
         wprintf(L"[!] KestrelScanACLEdges failed: 0x%08X\n", hr);
-    KestrelFreeACLScanResult(pResult);
+
+    /* ── v0.3: transitive group membership ───────────────────────────── */
+    hr = KestrelRunGroupScan(wszDomainNC, pACL, &pGroup);
+    if (FAILED(hr))
+        wprintf(L"[!] KestrelRunGroupScan failed: 0x%08X\n", hr);
 
 Cleanup:
+    KestrelFreeACLScanResult(pACL);
+    KestrelFreeGroupScanResult(pGroup);
     CoUninitialize();
     return HRESULT_CODE(hr);
 }
