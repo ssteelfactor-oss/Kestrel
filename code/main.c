@@ -58,6 +58,9 @@ int wmain(int argc, wchar_t *argv[])
         wprintf(L"[!] KestrelScanACLEdges failed: 0x%08X\n", hr);
 
     /* ── v0.3: transitive group membership ───────────────────────────── */
+    WCHAR wszRootPath[512] = { 0 };
+    StringCchPrintfW(wszRootPath, ARRAYSIZE(wszRootPath), L"LDAP://%s", wszDomainNC);
+
     hr = KestrelRunGroupScan(wszDomainNC, pACL, &pGroup);
     if (FAILED(hr))
         wprintf(L"[!] KestrelRunGroupScan failed: 0x%08X\n", hr);
