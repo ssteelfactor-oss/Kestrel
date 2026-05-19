@@ -1,6 +1,5 @@
 /*
  * main.c — Kestrel entry point.
- * Only wmain lives here — no scan logic.
  */
 
 #include "../include/Kestrel.h"
