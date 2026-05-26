@@ -58,22 +58,6 @@ static LPWSTR g_rgszRightAttrs[] = {
 /* ms-DS-Allowed-To-Act-On-Behalf-Of-Other-Identity (RBCD write)           */
 #define GUID_ALLOWED_TO_ACT_ON_BEHALF  L"{3f78c3e5-f79a-46bd-a0b8-9d18116ddc79}"
 
- /* Most Generic ADS Rights — bitmask of all possible الحقوق     */
-#define ADS_RIGHT_ALL            (ADS_RIGHT_READ_PROP            | \
-                                 ADS_RIGHT_WRITE_PROP           | \
-                                 ADS_RIGHT_APPEND              | \
-                                 ADS_RIGHT_READ_ATTRS          | \
-                                 ADS_RIGHT_WRITE_ATTRS         | \
-                                 ADS_RIGHT_CREATE_CHILD        | \
-                                 ADS_RIGHT_DELETE_CHILD        | \
-                                 ADS_RIGHT_READ_OWN            | \
-                                 ADS_RIGHT_WRITE_OWN           | \
-                                 ADS_RIGHT_READ_ACL            | \
-                                 ADS_RIGHT_WRITE_ACL           | \
-                                 ADS_RIGHT_DELETE               | \
-                                 ADS_RIGHT_EXECUTE             | \
-                                 ADS_RIGHT_CONTROL             | \
-                                 ADS_RIGHT_GENERIC_ALL         )
 
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Data structures                                                            */
@@ -828,14 +812,16 @@ KestrelScanACLEdges(
             StringCchPrintfW(wszObjPath, ARRAYSIZE(wszObjPath),
                 L"LDAP://%s", wszDN);
 
-            IDirectoryObject* pDirObj = NULL;
+            IDirectoryObject* pDirObj = 0;
             DWORD             cbSD = 0;
 
             HRESULT hrA = ADsGetObject(wszObjPath,
                 &IID_IDirectoryObject, (void**)&pDirObj);
-
-            if (hrA == E_FAIL || hrA == E_ACCESSDENIED ||
-                hrA == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)) {
+            wprintf(L"[*** ? ***] hrA = 0x%08X", hrA);
+            //if (hrA == E_FAIL || hrA == E_ACCESSDENIED ||
+            //    hrA == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)) 
+            
+            if( FAILED ( hrA ) ){
                 /*
                  * Plan A denied — switch to Plan B for this and all
                  * subsequent objects. Re-read SD from column below.
