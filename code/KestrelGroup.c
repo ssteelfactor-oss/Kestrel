@@ -120,15 +120,15 @@ KestrelGetDomainSID(
     if (!pwszRootPath || !ppDomainSid) return E_INVALIDARG;
     *ppDomainSid = NULL;
 
-    wprintf(L"[TRACE] KestrelGetDomainSID: binding to %s\n", pwszRootPath);
+    KTRACE(L" KestrelGetDomainSID: binding to %s\n", pwszRootPath);
 
     hr = ADsGetObject(pwszRootPath, &IID_IDirectorySearch, (void**)&pSearch);
     if (FAILED(hr)) {
-        wprintf(L"[TRACE] KestrelGetDomainSID: ADsGetObject failed 0x%08X\n", hr);
+        KTRACE(L" KestrelGetDomainSID: ADsGetObject failed 0x%08X\n", hr);
         goto Cleanup;
     }
 
-    wprintf(L"[TRACE] KestrelGetDomainSID: ADsGetObject OK, setting BASE scope\n");
+    KTRACE(L" KestrelGetDomainSID: ADsGetObject OK, setting BASE scope\n");
 
     ADS_SEARCHPREF_INFO prefs[1];
     prefs[0].dwSearchPref = ADS_SEARCHPREF_SEARCH_SCOPE;
@@ -137,7 +137,7 @@ KestrelGetDomainSID(
 
     hr = pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 1);
     if (FAILED(hr)) {
-        wprintf(L"[TRACE] KestrelGetDomainSID: SetSearchPreference failed 0x%08X\n", hr);
+        KTRACE(L" KestrelGetDomainSID: SetSearchPreference failed 0x%08X\n", hr);
         goto Cleanup;
     }
 
@@ -146,14 +146,14 @@ KestrelGetDomainSID(
         L"(objectClass=domainDNS)",
         attrs, ARRAYSIZE(attrs), &hSearch);
     if (FAILED(hr)) {
-        wprintf(L"[TRACE] KestrelGetDomainSID: ExecuteSearch failed 0x%08X\n", hr);
+        KTRACE(L" KestrelGetDomainSID: ExecuteSearch failed 0x%08X\n", hr);
         goto Cleanup;
     }
 
-    wprintf(L"[TRACE] KestrelGetDomainSID: ExecuteSearch OK, reading row\n");
+    KTRACE(L" KestrelGetDomainSID: ExecuteSearch OK, reading row\n");
 
     if (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) == S_ADS_NOMORE_ROWS) {
-        wprintf(L"[TRACE] KestrelGetDomainSID: no rows returned\n");
+        KTRACE(L" KestrelGetDomainSID: no rows returned\n");
         hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
         goto Cleanup;
     }
@@ -167,7 +167,7 @@ KestrelGetDomainSID(
         DWORD cbSid = col.pADsValues[0].OctetString.dwLength;
         BYTE* pbSid = col.pADsValues[0].OctetString.lpValue;
 
-        wprintf(L"[TRACE] KestrelGetDomainSID: objectSid found, %lu bytes\n", cbSid);
+        KTRACE(L" KestrelGetDomainSID: objectSid found, %lu bytes\n", cbSid);
 
         pSid = (PSID)HeapAlloc(GetProcessHeap(), 0, cbSid);
         if (!pSid) {
@@ -176,7 +176,7 @@ KestrelGetDomainSID(
         else {
             CopyMemory(pSid, pbSid, cbSid);
             if (!IsValidSid(pSid)) {
-                wprintf(L"[TRACE] KestrelGetDomainSID: SID validation failed\n");
+                KTRACE(L" KestrelGetDomainSID: SID validation failed\n");
                 HeapFree(GetProcessHeap(), 0, pSid);
                 pSid = NULL;
                 hr = E_UNEXPECTED;
@@ -184,7 +184,7 @@ KestrelGetDomainSID(
             else {
                 LPWSTR pwszSid = NULL;
                 if (ConvertSidToStringSidW(pSid, &pwszSid)) {
-                    wprintf(L"[TRACE] KestrelGetDomainSID: Domain SID = %s\n", pwszSid);
+                    KTRACE(L" KestrelGetDomainSID: Domain SID = %s\n", pwszSid);
                     LocalFree(pwszSid);
                 }
             }
@@ -192,7 +192,7 @@ KestrelGetDomainSID(
         pSearch->lpVtbl->FreeColumn(pSearch, &col);
     }
     else {
-        wprintf(L"[TRACE] KestrelGetDomainSID: objectSid column missing or wrong type\n");
+        KTRACE(L" KestrelGetDomainSID: objectSid column missing or wrong type\n");
         hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
     }
 
@@ -209,7 +209,7 @@ Cleanup:
     if (pSid)
         HeapFree(GetProcessHeap(), 0, pSid);
 
-    wprintf(L"[TRACE] KestrelGetDomainSID: exit hr=0x%08X\n", hr);
+    KTRACE(L" KestrelGetDomainSID: exit hr=0x%08X\n", hr);
     return hr;
 }
 
@@ -312,7 +312,7 @@ KestrelGetGroupDNBySid(
 
     hr = KestrelSidToLdapFilter(pGroupSid, wszSidOctet, ARRAYSIZE(wszSidOctet));
     if (FAILED(hr)) {
-        wprintf(L"[TRACE] SidToLdapFilter failed: 0x%08X\n", hr);
+        KTRACE(L" SidToLdapFilter failed: 0x%08X\n", hr);
         return hr;
     }
 
@@ -320,11 +320,11 @@ KestrelGetGroupDNBySid(
         L"(&(objectClass=group)(objectSid=%s))", wszSidOctet);
     if (FAILED(hr)) return hr;
 
-    wprintf(L"[TRACE] Filter built OK, binding to root path\n");
+    KTRACE(L" Filter built OK, binding to root path\n");
 
     hr = ADsGetObject(pwszRootPath, &IID_IDirectorySearch, (void**)&pSearch);
     if (FAILED(hr)) {
-        wprintf(L"[TRACE] ADsGetObject failed: 0x%08X\n", hr);
+        KTRACE(L" ADsGetObject failed: 0x%08X\n", hr);
         goto Cleanup;
     }
 
@@ -338,7 +338,7 @@ KestrelGetGroupDNBySid(
 
     hr = pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 2);
     if (FAILED(hr)) {
-        wprintf(L"[TRACE] SetSearchPreference failed: 0x%08X\n", hr);
+        KTRACE(L" SetSearchPreference failed: 0x%08X\n", hr);
         goto Cleanup;
     }
 
@@ -346,11 +346,11 @@ KestrelGetGroupDNBySid(
     hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
         wszFilter, attrs, ARRAYSIZE(attrs), &hSearch);
     if (FAILED(hr)) {
-        wprintf(L"[TRACE] ExecuteSearch failed: 0x%08X\n", hr);
+        KTRACE(L" ExecuteSearch failed: 0x%08X\n", hr);
         goto Cleanup;
     }
 
-    wprintf(L"[TRACE] ExecuteSearch OK, waiting for first row\n");
+    KTRACE(L" ExecuteSearch OK, waiting for first row\n");
 
     if (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
 
@@ -363,7 +363,7 @@ KestrelGetGroupDNBySid(
             colDN.pADsValues[0].dwType == ADSTYPE_DN_STRING) {
             StringCchCopyW(pwszDNBuf, cchDNBuf, colDN.pADsValues[0].DNString);
             bFound = TRUE;
-            wprintf(L"[TRACE] Found DN: %s\n", pwszDNBuf);
+            KTRACE(L" Found DN: %s\n", pwszDNBuf);
         }
 
         if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
@@ -372,14 +372,14 @@ KestrelGetGroupDNBySid(
             colSAM.pADsValues[0].dwType == ADSTYPE_CASE_IGNORE_STRING) {
             StringCchCopyW(pwszSAMBuf, cchSAM,
                 colSAM.pADsValues[0].CaseIgnoreString);
-            wprintf(L"[TRACE] sAMAccountName: %s\n", pwszSAMBuf);
+            KTRACE(L" sAMAccountName: %s\n", pwszSAMBuf);
         }
 
         pSearch->lpVtbl->FreeColumn(pSearch, &colDN);
         pSearch->lpVtbl->FreeColumn(pSearch, &colSAM);
     }
     else {
-        wprintf(L"[TRACE] No rows returned — group not in this domain\n");
+        KTRACE(L" No rows returned — group not in this domain\n");
     }
 
     if (!bFound)
@@ -391,7 +391,7 @@ Cleanup:
     if (pSearch)
         pSearch->lpVtbl->Release(pSearch);
 
-    wprintf(L"[TRACE] KestrelGetGroupDNBySid exit: hr=0x%08X found=%d\n", hr, bFound);
+    KTRACE(L" KestrelGetGroupDNBySid exit: hr=0x%08X found=%d\n", hr, bFound);
     return hr;
 }
 
@@ -420,7 +420,7 @@ KestrelTransitiveMembership(
     *ppResult = NULL;
 
     wprintf(L"\n[TRACE] KestrelTransitiveMembership: group='%s'\n", pwszGroupName);
-    wprintf(L"[TRACE] DN: %s\n", pwszGroupDN);
+    KTRACE(L" DN: %s\n", pwszGroupDN);
 
     pRes = (KESTREL_GROUP_RESULT*)HeapAlloc(GetProcessHeap(),
         HEAP_ZERO_MEMORY, sizeof(*pRes));
@@ -434,11 +434,11 @@ KestrelTransitiveMembership(
         KESTREL_TRANSITIVE_FILTER_FMT, pwszGroupDN);
     if (FAILED(hr)) goto Cleanup;
 
-    wprintf(L"[TRACE] Transitive filter built, binding to root\n");
+    KTRACE(L" Transitive filter built, binding to root\n");
 
     hr = ADsGetObject(pwszRootPath, &IID_IDirectorySearch, (void**)&pSearch);
     if (FAILED(hr)) {
-        wprintf(L"[TRACE] ADsGetObject failed: 0x%08X\n", hr);
+        KTRACE(L" ADsGetObject failed: 0x%08X\n", hr);
         goto Cleanup;
     }
 
@@ -461,11 +461,11 @@ KestrelTransitiveMembership(
     hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
         wszFilter, attrs, ARRAYSIZE(attrs), &hSearch);
     if (FAILED(hr)) {
-        wprintf(L"[TRACE] ExecuteSearch failed: 0x%08X\n", hr);
+        KTRACE(L" ExecuteSearch failed: 0x%08X\n", hr);
         goto Cleanup;
     }
 
-    wprintf(L"[TRACE] ExecuteSearch OK, iterating members\n");
+    KTRACE(L" ExecuteSearch OK, iterating members\n");
 
     while (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
 
@@ -485,7 +485,7 @@ KestrelTransitiveMembership(
             bGotDN = TRUE;
 
         if (!bGotDN) {
-            wprintf(L"[TRACE]   Skipping row — no DN\n");
+            KTRACE(L"   Skipping row — no DN\n");
             goto NextRow;
         }
 
@@ -544,7 +544,7 @@ KestrelTransitiveMembership(
         if (bGotUAC && (colUAC.pADsValues[0].Integer & 0x2))
             pMember->bEnabled = FALSE;
 
-        wprintf(L"[TRACE]   Member #%lu: %-30s [%s] %s\n",
+        KTRACE(L"   Member #%lu: %-30s [%s] %s\n",
             pRes->cMembers + 1,
             pMember->wszSAM[0] ? pMember->wszSAM : pMember->wszDN,
             pMember->wszClass,
@@ -563,7 +563,7 @@ KestrelTransitiveMembership(
         if (bGotUAC)   pSearch->lpVtbl->FreeColumn(pSearch, &colUAC);
     }
 
-    wprintf(L"[TRACE] KestrelTransitiveMembership: done — %lu members (%lu enabled)\n",
+    KTRACE(L" KestrelTransitiveMembership: done — %lu members (%lu enabled)\n",
         pRes->cMembers, pRes->cEnabled);
 
     *ppResult = pRes;
@@ -597,11 +597,11 @@ KestrelResolveACLTrustees(
         pGroupResult ? pGroupResult->cGroups : 0);
 
     if (!pACLResult || !pGroupResult) {
-        wprintf(L"[TRACE] KestrelResolveACLTrustees: NULL input — skipping\n");
+        KTRACE(L" KestrelResolveACLTrustees: NULL input — skipping\n");
         return S_OK;
     }
     if (pACLResult->cEdges == 0 || pGroupResult->cGroups == 0) {
-        wprintf(L"[TRACE] KestrelResolveACLTrustees: no edges or no groups — skipping\n");
+        KTRACE(L" KestrelResolveACLTrustees: no edges or no groups — skipping\n");
         return S_OK;
     }
 
@@ -687,8 +687,8 @@ KestrelRunGroupScan(
     *ppResult = NULL;
 
     wprintf(L"\n[TRACE] === KestrelRunGroupScan start ===\n");
-    wprintf(L"[TRACE] Root path: %s\n", pwszRootPath);
-    wprintf(L"[TRACE] ACL result: %s (%lu edges)\n",
+    KTRACE(L" Root path: %s\n", pwszRootPath);
+    KTRACE(L" ACL result: %s (%lu edges)\n",
         pACLResult ? L"provided" : L"NULL",
         pACLResult ? pACLResult->cEdges : 0);
 
@@ -702,7 +702,7 @@ KestrelRunGroupScan(
     wprintf(L"\n═══ Kestrel v0.3 — Transitive Group Membership ═══\n\n");
 
     /* ── 1. Resolve Domain SID ───────────────────────────────────────── */
-    wprintf(L"[TRACE] Step 1: resolving Domain SID\n");
+    KTRACE(L" Step 1: resolving Domain SID\n");
     hr = KestrelGetDomainSID(pwszRootPath, &pDomainSid);
     if (FAILED(hr)) {
         wprintf(L"  [!] Failed to resolve Domain SID: 0x%08X\n", hr);
@@ -721,7 +721,7 @@ KestrelRunGroupScan(
         L"--------------------------------------------------------------------------------");
 
     /* ── 2. Iterate high-value groups by RID ─────────────────────────── */
-    wprintf(L"[TRACE] Step 2: iterating %zu high-value RIDs\n",
+    KTRACE(L" Step 2: iterating %zu high-value RIDs\n",
         KESTREL_HV_GROUP_COUNT);
 
     for (SIZE_T i = 0; i < KESTREL_HV_GROUP_COUNT; i++) {
@@ -737,14 +737,14 @@ KestrelRunGroupScan(
 
         HRESULT hrGroup = KestrelBuildGroupSid(pDomainSid, dwRID, &pGroupSid);
         if (FAILED(hrGroup)) {
-            wprintf(L"[TRACE] BuildGroupSid failed: 0x%08X\n", hrGroup);
+            KTRACE(L" BuildGroupSid failed: 0x%08X\n", hrGroup);
             pRes->cErrors++;
             continue;
         }
 
         LPWSTR pwszGroupSidStr = NULL;
         if (ConvertSidToStringSidW(pGroupSid, &pwszGroupSidStr)) {
-            wprintf(L"[TRACE] Group SID: %s\n", pwszGroupSidStr);
+            KTRACE(L" Group SID: %s\n", pwszGroupSidStr);
             LocalFree(pwszGroupSidStr);
         }
 
@@ -754,26 +754,26 @@ KestrelRunGroupScan(
         FreeSid(pGroupSid);
 
         if (hrGroup == HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) {
-            wprintf(L"[TRACE] Group not found in domain — skipping\n");
+            KTRACE(L" Group not found in domain — skipping\n");
             continue;
         }
 
         if (FAILED(hrGroup)) {
-            wprintf(L"[TRACE] GetGroupDNBySid failed: 0x%08X\n", hrGroup);
+            KTRACE(L" GetGroupDNBySid failed: 0x%08X\n", hrGroup);
             pRes->cErrors++;
             continue;
         }
 
         LPCWSTR pwszName = wszSAM[0] ? wszSAM : pwszLabel;
 
-        wprintf(L"[TRACE] Resolved: SAM='%s' DN='%s'\n", pwszName, wszDN);
-        wprintf(L"[TRACE] Starting transitive expansion\n");
+        KTRACE(L" Resolved: SAM='%s' DN='%s'\n", pwszName, wszDN);
+        KTRACE(L" Starting transitive expansion\n");
 
         KESTREL_GROUP_RESULT* pGroup = NULL;
         hrGroup = KestrelTransitiveMembership(pwszRootPath, wszDN,
             pwszName, &pGroup);
         if (FAILED(hrGroup) || !pGroup) {
-            wprintf(L"[TRACE] TransitiveMembership failed: 0x%08X\n", hrGroup);
+            KTRACE(L" TransitiveMembership failed: 0x%08X\n", hrGroup);
             pRes->cErrors++;
             continue;
         }
@@ -790,13 +790,13 @@ KestrelRunGroupScan(
         pRes->cGroups, pRes->cErrors);
 
     /* ── 3. Cross-reference with ACL edges ───────────────────────────── */
-    wprintf(L"[TRACE] Step 3: cross-referencing ACL trustees\n");
+    KTRACE(L" Step 3: cross-referencing ACL trustees\n");
     hr = KestrelResolveACLTrustees(pwszRootPath, pACLResult, pRes);
 
     *ppResult = pRes;
     pRes = NULL;
 
-    wprintf(L"[TRACE] === KestrelRunGroupScan complete ===\n");
+    KTRACE(L" === KestrelRunGroupScan complete ===\n");
 
 Cleanup:
     if (pDomainSid) HeapFree(GetProcessHeap(), 0, pDomainSid);

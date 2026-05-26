@@ -36,6 +36,14 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "advapi32.lib")
 
+
+/* ── Logging ─────────────────────────────────────────────────────────── */
+extern BOOL g_bVerbose;
+
+#define KTRACE(fmt, ...) \
+    if ( g_bVerbose ) wprintf( L"[TRACE] " fmt L"\n", ##__VA_ARGS__ )
+
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Shared constants
  * ═══════════════════════════════════════════════════════════════════════════ */
