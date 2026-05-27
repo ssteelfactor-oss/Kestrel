@@ -108,7 +108,12 @@ After expansion, cross-references group membership against ACL edges from v0.2 t
 | v0.5 | 🔲 | BFS path finder. Attack path analysis: any principal → Domain Admins, shortest route. |
 
 ## Screens
-
+ADWS scanning in progress...
+![Kestrel output](assets/ADWS Scan.png)
+Stall - active points detecting...
+![Kestrel output](assets/stall-active.png)
+Searching domain SIDs...
+![Kestrel output](assets/DomainSID.png)
 ## Code quality
 
 **SAL 2.0 annotations** on every function signature  validated by PREfast (`/analyze`) at compile time. `_Must_inspect_result_` on HRESULT-returning functions, `_Outptr_` vs `_Out_` where semantics differ.
