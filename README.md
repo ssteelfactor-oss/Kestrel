@@ -107,6 +107,9 @@ After expansion, cross-references group membership against ACL edges from v0.2 t
 | v0.4 | 🔲 | In-memory graph from ACL + membership + delegation data. JSON export. |
 | v0.5 | 🔲 | BFS path finder. Attack path analysis: any principal → Domain Admins, shortest route. |
 
+## Screens
+![Kestrel output](assets/stall-active.png)
+![Kestrel output](assets/DomainSID.png)
 ## Code quality
 
 **SAL 2.0 annotations** on every function signature  validated by PREfast (`/analyze`) at compile time. `_Must_inspect_result_` on HRESULT-returning functions, `_Outptr_` vs `_Out_` where semantics differ.
