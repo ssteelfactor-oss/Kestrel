@@ -1,76 +1,242 @@
 /*
  * main.c — Kestrel entry point.
+ *
+ * Usage:
+ *   Kestrel.exe [modules] [output] [options]
+ *
+ * Modules (default: all):
+ *   --all          Run all modules (default when none specified)
+ *   --adws         ADWS endpoint detection
+ *   --topology     Computer topology via SPN
+ *   --delegation   Delegation risks
+ *   --laps         LAPS coverage
+ *   --stale        Stale computers
+ *   --acl          ACL edge extraction
+ *   --groups       Transitive group membership
+ *
+ * Output:
+ *   --report <path>  Generate HTML report
+ *
+ * Options:
+ *   --verbose / -v   Enable trace output
+ *   --version        Show version and exit
+ *   --help / -h      Show this help and exit
  */
 
 #include "../include/Kestrel.h"
 
+BOOL g_bVerbose = FALSE;
 
-BOOL g_bVerbose = FALSE; // --verbose flag
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  Help and version                                                           */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+static VOID
+KestrelPrintVersion(VOID)
+{
+    wprintf(L"\nKestrel %s — Passive AD Security Enumeration\n", KESTREL_VERSION);
+    wprintf(L"github.com/ssteelfactor-oss/Kestrel\n\n");
+}
+
+static VOID
+KestrelPrintHelp(VOID)
+{
+    KestrelPrintVersion();
+    wprintf(
+        L"USAGE:\n"
+        L"  Kestrel.exe [modules] [output] [options]\n\n"
+        L"MODULES (default: all):\n"
+        L"  --all          Run all modules\n"
+        L"  --adws         ADWS endpoint detection (port 9389/TCP per DC)\n"
+        L"  --topology     Computer topology via SPN decoding\n"
+        L"  --delegation   Delegation risks (unconstrained/constrained/S4U2Self)\n"
+        L"  --laps         LAPS coverage (legacy + Windows LAPS 2023+)\n"
+        L"  --stale        Stale computers via lastLogonTimestamp\n"
+        L"  --acl          ACL edge extraction via IDirectoryObject\n"
+        L"  --groups       Transitive group membership via LDAP_MATCHING_RULE_IN_CHAIN\n\n"
+        L"OUTPUT:\n"
+        L"  --report <path>  Generate HTML report to specified path\n\n"
+        L"OPTIONS:\n"
+        L"  --verbose / -v   Enable trace output\n"
+        L"  --version        Show version and exit\n"
+        L"  --help / -h      Show this help and exit\n\n"
+        L"EXAMPLES:\n"
+        L"  Kestrel.exe\n"
+        L"  Kestrel.exe --report C:\\out\\report.html\n"
+        L"  Kestrel.exe --acl --groups --report C:\\out\\report.html\n"
+        L"  Kestrel.exe --delegation --verbose\n"
+        L"  Kestrel.exe --report %%USERPROFILE%%\\Desktop\\report.html\n\n"
+    );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  Argument parser                                                            */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+static BOOL
+KestrelParseArgs(
+    _In_  int             argc,
+    _In_  wchar_t* argv[],
+    _Out_ KESTREL_CONFIG* pCfg)
+{
+    /* Zero-init */
+    SecureZeroMemory(pCfg, sizeof(*pCfg));
+
+    for (int i = 1; i < argc; i++) {
+        LPCWSTR arg = argv[i];
+
+        /* ── Help / version ──────────────────────────────────────── */
+        if (_wcsicmp(arg, L"--help") == 0 || _wcsicmp(arg, L"-h") == 0) {
+            KestrelPrintHelp();
+            return FALSE;   /* caller should exit with 0 */
+        }
+        if (_wcsicmp(arg, L"--version") == 0) {
+            KestrelPrintVersion();
+            return FALSE;
+        }
+
+        /* ── Options ─────────────────────────────────────────────── */
+        if (_wcsicmp(arg, L"--verbose") == 0 ||
+            _wcsicmp(arg, L"-v") == 0) {
+            pCfg->bVerbose = TRUE;
+            g_bVerbose = TRUE;
+            continue;
+        }
+
+        /* ── Output ──────────────────────────────────────────────── */
+        if (_wcsicmp(arg, L"--report") == 0) {
+            if (i + 1 >= argc) {
+                wprintf(L"[!] --report requires a path argument\n");
+                return FALSE;
+            }
+            StringCchCopyW(pCfg->wszReportPath,
+                ARRAYSIZE(pCfg->wszReportPath),
+                argv[++i]);
+            continue;
+        }
+
+        /* ── Modules ─────────────────────────────────────────────── */
+        if (_wcsicmp(arg, L"--all") == 0) {
+            pCfg->bRunADWS = TRUE;
+            pCfg->bRunTopology = TRUE;
+            pCfg->bRunDelegation = TRUE;
+            pCfg->bRunLAPS = TRUE;
+            pCfg->bRunStale = TRUE;
+            pCfg->bRunACL = TRUE;
+            pCfg->bRunGroups = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--adws") == 0) {
+            pCfg->bRunADWS = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--topology") == 0) {
+            pCfg->bRunTopology = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--delegation") == 0) {
+            pCfg->bRunDelegation = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--laps") == 0) {
+            pCfg->bRunLAPS = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--stale") == 0) {
+            pCfg->bRunStale = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--acl") == 0) {
+            pCfg->bRunACL = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--groups") == 0) {
+            pCfg->bRunGroups = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+
+        /* ── Unknown argument ────────────────────────────────────── */
+        wprintf(L"[!] Unknown argument: %s\n", arg);
+        wprintf(L"    Run Kestrel.exe --help for usage\n");
+        return FALSE;
+    }
+
+    /* Default: run all modules if none specified */
+    if (!pCfg->bExplicitModules) {
+        pCfg->bRunADWS = TRUE;
+        pCfg->bRunTopology = TRUE;
+        pCfg->bRunDelegation = TRUE;
+        pCfg->bRunLAPS = TRUE;
+        pCfg->bRunStale = TRUE;
+        pCfg->bRunACL = TRUE;
+        pCfg->bRunGroups = TRUE;
+    }
+
+    return TRUE;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  Entry point                                                                */
+/* ─────────────────────────────────────────────────────────────────────────── */
 
 int wmain(int argc, wchar_t* argv[])
 {
+    KESTREL_CONFIG cfg = { 0 };
 
-    for (int i = 1; i < argc; i++) {
-        if (_wcsicmp(argv[i], L"--verbose") == 0 ||
-            _wcsicmp(argv[i], L"-v") == 0)
-            g_bVerbose = TRUE;
-    }
+    /* Parse args — exit cleanly on --help/--version or bad args */
+    if (!KestrelParseArgs(argc, argv, &cfg))
+        return 0;
 
-    //(void)argc; (void)argv;
+    KestrelPrintVersion();
 
-    wprintf(L"\n[TRACE] === Program Start ===\n");
-    wprintf(L"New ersiob hey there\n");
-
-    KTRACE(L" Initializing COM...\n");
+    /* ── COM init ─────────────────────────────────────────────────── */
+    KTRACE(L"Initializing COM...");
     HRESULT hr = CoInitializeEx(0, COINIT_MULTITHREADED);
     if (FAILED(hr)) {
         wprintf(L"[!] CoInitializeEx failed: 0x%08X\n", hr);
         return (int)hr;
     }
-    KTRACE(L" COM initialized successfully\n");
 
     WCHAR   wszDomainNC[512] = { 0 };
     WCHAR   wszConfigNC[512] = { 0 };
-    IADs* pRootDSE = NULL;
-    KESTREL_ACL_SCAN_RESULT* pACL = NULL;
-    KESTREL_GROUP_SCAN_RESULT* pGroup = NULL;
+    WCHAR   wszRootPath[512] = { 0 };
+    IADs* pRootDSE = 0;
+    KESTREL_ACL_SCAN_RESULT* pACL = 0;
+    KESTREL_GROUP_SCAN_RESULT* pGroup = 0;
+    KESTREL_GRAPH* pGraph = 0;
     VARIANT varDomain, varConfig;
     VariantInit(&varDomain);
     VariantInit(&varConfig);
 
-    /* ── Resolve rootDSE once — passed to all modules ────────────────── */
-    KTRACE(L" Connecting to LDAP://rootDSE...\n");
+    /* ── Resolve rootDSE ──────────────────────────────────────────── */
+    KTRACE(L"Connecting to LDAP://rootDSE...");
     hr = ADsGetObject(L"LDAP://rootDSE", &IID_IADs, (void**)&pRootDSE);
     if (FAILED(hr)) {
         wprintf(L"[!] rootDSE bind failed: 0x%08X\n", hr);
-        KTRACE(L" This usually means:\n");
-        KTRACE(L"   - Not running on domain-joined machine\n");
-        KTRACE(L"   - No domain controller reachable\n");
-        KTRACE(L"   - LDAP service not available\n");
+        KTRACE(L"Not domain-joined or DC unreachable");
         goto Cleanup;
     }
-    KTRACE(L" rootDSE connected successfully\n");
 
-    KTRACE(L" Getting defaultNamingContext...\n");
     if (SUCCEEDED(pRootDSE->lpVtbl->Get(pRootDSE,
         L"defaultNamingContext", &varDomain)) &&
         varDomain.vt == VT_BSTR) {
         StringCchCopyW(wszDomainNC, ARRAYSIZE(wszDomainNC), varDomain.bstrVal);
-        KTRACE(L" Domain NC: %ls\n", wszDomainNC);
-    }
-    else {
-        wprintf(L"[!] Failed to get defaultNamingContext\n");
+        KTRACE(L"Domain NC: %s", wszDomainNC);
     }
 
-    KTRACE(L" Getting configurationNamingContext...\n");
     if (SUCCEEDED(pRootDSE->lpVtbl->Get(pRootDSE,
         L"configurationNamingContext", &varConfig)) &&
         varConfig.vt == VT_BSTR) {
         StringCchCopyW(wszConfigNC, ARRAYSIZE(wszConfigNC), varConfig.bstrVal);
-        KTRACE(L" Config NC: %ls\n", wszConfigNC);
-    }
-    else {
-        wprintf(L"[!] Failed to get configurationNamingContext\n");
+        KTRACE(L"Config NC: %s", wszConfigNC);
     }
 
     pRootDSE->lpVtbl->Release(pRootDSE);
@@ -78,56 +244,67 @@ int wmain(int argc, wchar_t* argv[])
     VariantClear(&varConfig);
 
     if (wszDomainNC[0] == L'\0') {
-        wprintf(L"[!] CRITICAL: No domain context available, cannot proceed\n");
+        wprintf(L"[!] No domain context — cannot proceed\n");
         goto Cleanup;
     }
 
-    /* ── v0.1: five passive AD scans ─────────────────────────────────── */
-    wprintf(L"\n[TRACE] === Starting v0.1 AD Passive Scan ===\n");
-    wprintf(L"\n═══ Kestrel v0.1 — AD Passive Scan ═══\n\n");
-    hr = RunADWSScan();
-    if (FAILED(hr))
-        wprintf(L"[!] RunADWSScan reported errors: 0x%08X\n", hr);
-    else
-        KTRACE(L" RunADWSScan completed successfully\n");
+    StringCchPrintfW(wszRootPath, ARRAYSIZE(wszRootPath),
+        L"LDAP://%s", wszDomainNC);
 
-    /* ── v0.2: ACL edge extraction ───────────────────────────────────── */
-    wprintf(L"\n[TRACE] === Starting v0.2 ACL Edge Scan ===\n");
-    KTRACE(L" Domain NC: %ls\n", wszDomainNC);
-    KTRACE(L" Config NC: %ls\n", wszConfigNC);
-    wprintf(L"\n═══ Kestrel v0.2 — ACL Edge Scan ═══\n\n");
-    hr = KestrelScanACLEdges(wszDomainNC, wszConfigNC, &pACL);
-    if (FAILED(hr))
-        wprintf(L"[!] KestrelScanACLEdges failed: 0x%08X\n", hr);
-    else
-        KTRACE(L" KestrelScanACLEdges completed (edges: %lu)\n",
-            pACL ? pACL->cEdges : 0);
+    wprintf(L"[*] Domain: %s\n", wszDomainNC);
 
-    /* ── v0.3: transitive group membership ───────────────────────────── */
-    wprintf(L"\n[TRACE] === Starting v0.3 Group Scan ===\n");
-    WCHAR wszRootPath[512] = { 0 };
-    StringCchPrintfW(wszRootPath, ARRAYSIZE(wszRootPath), L"LDAP://%ls", wszDomainNC);
-    KTRACE(L" Root path constructed: %ls\n", wszRootPath);
+    /* ── v0.1 modules ─────────────────────────────────────────────── */
+    if (cfg.bRunADWS || cfg.bRunTopology ||
+        cfg.bRunDelegation || cfg.bRunLAPS || cfg.bRunStale) {
 
-    hr = KestrelRunGroupScan(wszRootPath, pACL, &pGroup);
-    if (FAILED(hr))
-        wprintf(L"[!] KestrelRunGroupScan failed: 0x%08X\n", hr);
-    else
-        KTRACE(L" KestrelRunGroupScan completed (groups: %lu)\n",
-            pGroup ? pGroup->cGroups : 0);
+        wprintf(L"\n═══ Kestrel v0.1 — AD Passive Scan ═══\n\n");
+        hr = RunADWSScan();
+        if (FAILED(hr))
+            wprintf(L"[!] RunADWSScan reported errors: 0x%08X\n", hr);
+        KTRACE(L"v0.1 complete");
+    }
+
+    /* ── v0.2: ACL edge extraction ───────────────────────────────── */
+    if (cfg.bRunACL) {
+        wprintf(L"\n═══ Kestrel v0.2 — ACL Edge Scan ═══\n\n");
+        hr = KestrelScanACLEdges(wszDomainNC, wszConfigNC, &pACL);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelScanACLEdges failed: 0x%08X\n", hr);
+        KTRACE(L"v0.2 complete — edges: %lu", pACL ? pACL->cEdges : 0);
+    }
+
+    /* ── v0.3: transitive group membership ───────────────────────── */
+    if (cfg.bRunGroups) {
+        hr = KestrelRunGroupScan(wszRootPath, pACL, &pGroup);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunGroupScan failed: 0x%08X\n", hr);
+        KTRACE(L"v0.3 complete — groups: %lu", pGroup ? pGroup->cGroups : 0);
+    }
+
+    /* ── v0.4: build graph + HTML report ─────────────────────────── */
+    if (cfg.bRunACL || cfg.bRunGroups) {
+        hr = KestrelBuildGraph(pACL, pGroup, &pGraph);
+        if (FAILED(hr)) {
+            wprintf(L"[!] KestrelBuildGraph failed: 0x%08X\n", hr);
+        }
+        else if (cfg.wszReportPath[0] != L'\0') {
+            hr = KestrelWriteHTMLReport(pGraph, cfg.wszReportPath);
+            if (FAILED(hr))
+                wprintf(L"[!] KestrelWriteHTMLReport failed: 0x%08X\n", hr);
+        }
+        else {
+            wprintf(L"\n[*] Graph: %lu nodes, %lu edges\n",
+                pGraph ? pGraph->cNodes : 0,
+                pGraph ? pGraph->cEdges : 0);
+            wprintf(L"[*] Use --report <path.html> to generate visual report\n");
+        }
+    }
 
 Cleanup:
-    wprintf(L"\n[TRACE] === Cleanup Phase ===\n");
-    if (pACL) {
-        KTRACE(L" Freeing ACL results...\n");
-        KestrelFreeACLScanResult(pACL);
-    }
-    if (pGroup) {
-        KTRACE(L" Freeing Group results...\n");
-        KestrelFreeGroupScanResult(pGroup);
-    }
-    KTRACE(L" Uninitializing COM...\n");
+    KTRACE(L"Cleanup...");
+    KestrelFreeACLScanResult(pACL);
+    KestrelFreeGroupScanResult(pGroup);
+    KestrelFreeGraph(pGraph);
     CoUninitialize();
-    KTRACE(L" === Program Exit (code: %d) ===\n", HRESULT_CODE(hr));
     return HRESULT_CODE(hr);
 }

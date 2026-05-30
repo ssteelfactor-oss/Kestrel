@@ -27,6 +27,12 @@
     <ClCompile Include="code\KestrelGroup.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="code\KestrelReport.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
+    <ClCompile Include="code\KestrelPolicy.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Kestrel.h">
