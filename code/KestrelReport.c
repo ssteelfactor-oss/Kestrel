@@ -196,6 +196,8 @@ KestrelWriteHTMLReport(
     _In_     const KESTREL_GRAPH* pGraph,
     _In_z_   LPCWSTR              pwszOutputPath)
 {
+
+    HRESULT hr = S_OK;   /* ← добавить */
     if (!pGraph || !pwszOutputPath) return E_INVALIDARG;
 
     wprintf(L"\n[*] Writing HTML report: %s\n", pwszOutputPath);

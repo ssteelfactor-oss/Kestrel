@@ -20,6 +20,9 @@
  *   Header:  52 65 67 66 01 00 00 00  ("Regf" + version)
  *   Entries: [keypath;valuename;type;size;data]
  *   Each field delimited by 0x00 0x00 (null wchar)
+ * UPD: must to be
+ * static const BYTE g_rgbPolMagic[] =
+ *             { 0x50, 0x52, 0x65, 0x67, 0x01, 0x00, 0x00, 0x00 };
  */
 
 #include "../include/Kestrel.h"
@@ -144,7 +147,7 @@ _Must_inspect_result_
 static HRESULT
 KestrelParseRegistryPol(
     _In_z_   LPCWSTR          pwszPolPath,
-    _Outptr_ KESTREL_POL_ENTRY **ppEntries);
+    _Outptr_result_maybenull_ KESTREL_POL_ENTRY** ppEntries);
 
 /*
  * Search parsed pol entries for a specific key/value.
@@ -490,8 +493,8 @@ KestrelEnumGPOs(
 
             LPCWSTR pwszSysPath = colPath.pADsValues[0].CaseIgnoreString;
             SIZE_T  cch         = wcslen(pwszSysPath) + 1;
-            rgPaths [cPaths] = (LPWSTR) HeapAlloc(GetProcessHeap(), 0,
-                                                  cch * sizeof(WCHAR));
+            rgPaths[cPaths] = (LPWSTR)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                cch * sizeof(WCHAR));
             if (rgPaths[cPaths]) {
                 StringCchCopyW( rgPaths[cPaths], cch, pwszSysPath) ;
                 rgPaths [cPaths] [cch - 1] = L'\0';  /* гарантируем null terminator */
@@ -522,40 +525,102 @@ Cleanup:
 }
 
 /*
- * KestrelParseRegistryPol — implementation.
+ * KestrelParseRegistryPol — corrected implementation.
  *
- * Replace the E_NOTIMPL stub in KestrelPolicy.c with this function.
+ * Drop-in replacement for the existing KestrelParseRegistryPol in
+ * KestrelPolicy.c (currently ~lines 554–746). Two corrections vs. the
+ * previous version:
  *
- * Parses Registry.pol binary format (MS-GPEF section 2.2.2).
+ *   FIX 1 — Signature.
+ *     Registry.pol uses the PReg format (MS-GPEF 2.2.1): the file begins
+ *     with "PReg" (0x50 0x52 0x65 0x67) + version DWORD 0x00000001.
+ *     The old magic was "Regf" (0x52 0x65 0x67 0x66), which is the
+ *     registry HIVE signature — a different format. With the wrong magic
+ *     the memcmp failed on every real .pol file, so the SYSVOL path
+ *     silently parsed nothing and every check fell through to
+ *     INSECURE-by-default.
  *
- * File structure:
- *   [0..7]   Header: 52 65 67 66 01 00 00 00
- *   [8..]    Entries, each:
- *              5B 00          '[' — entry start
- *              key  00 00     UTF-16 path, double-null terminated
- *              3B 00          ';'
- *              val  00 00     UTF-16 value name, double-null terminated
- *              3B 00          ';'
- *              type 00 00     DWORD as UTF-16 text? No — raw DWORD (4 bytes)
- *              3B 00          ';'
- *              size 00 00     raw DWORD (4 bytes)
- *              3B 00          ';'
- *              data           raw bytes (size bytes)
- *              5D 00          ']' — entry end
+ *     => Update the file-scope constant in KestrelPolicy.c (line ~32) to:
  *
- * Note on type/size encoding:
- *   Per MS-GPEF 2.2.2, type and size are stored as little-endian DWORDs
- *   (4 bytes each), NOT as text. Only key and value name are UTF-16 strings.
+ *         static const BYTE g_rgbPolMagic[] =
+ *             { 0x50, 0x52, 0x65, 0x67, 0x01, 0x00, 0x00, 0x00 };
  *
- * We only collect REG_DWORD (type 4) entries — sufficient for all
- * security policy checks (LLMNR, NBT-NS, WDigest, LmCompatibilityLevel).
+ *     and fix the two header comments that quote "Regf" (lines ~20, ~532).
+ *
+ *   FIX 2 — String termination.
+ *     In PReg each entry is  [ key\0 ; value\0 ; type ; size ; data ]
+ *     where '[' ']' ';' are literal UTF-16 chars (2 bytes each), key and
+ *     value are SINGLE-null-terminated UTF-16LE strings, and type/size are
+ *     raw little-endian DWORDs. The old loop searched for a DOUBLE null,
+ *     so it never terminated at "key\0" — it swallowed the ';' separator
+ *     into the key and ran into the value field, after which the ';' check
+ *     failed and the entry was discarded.
+ *
+ *     => Terminate each string on the FIRST null; the ';' follows it.
+ *        Handled here by the KestrelReadPolWStr helper.
+ *
+ * Verify on a real file: `xxd machine\Registry.pol | head` — first four
+ * bytes must be 50 52 65 67 ("PReg").
  */
+
+#include "../include/Kestrel.h"
+
+ /* ─────────────────────────────────────────────────────────────────────────── */
+ /*  Helper: read one single-null-terminated UTF-16LE string                    */
+ /* ─────────────────────────────────────────────────────────────────────────── */
+
+ /*
+  * KestrelReadPolWStr
+  * Reads a single-null-terminated UTF-16LE string from pBuf starting at
+  * *ppos, copying up to cchMax-1 chars into pwszOut (always null-terminated).
+  * If the string is longer than the buffer it still consumes the full string
+  * so *ppos stays byte-aligned for the caller. Advances *ppos past the
+  * terminating null.
+  *
+  * Returns TRUE if a null terminator was found within the buffer,
+  * FALSE if the buffer ended first (truncated / malformed tail).
+  */
+static BOOL
+KestrelReadPolWStr(
+    _In_reads_bytes_(cbBuf) const BYTE* pBuf,
+    _In_                    DWORD        cbBuf,
+    _Inout_                 DWORD* ppos,
+    _Out_writes_z_(cchMax)  LPWSTR       pwszOut,
+    _In_                    DWORD        cchMax)
+{
+    DWORD pos = *ppos;
+    DWORD cch = 0;
+
+    pwszOut[0] = L'\0';
+
+    while (pos + 2 <= cbBuf) {
+        WCHAR wch = (WCHAR)(pBuf[pos] | ((WORD)pBuf[pos + 1] << 8));
+        pos += 2;
+
+        if (wch == L'\0') {              /* single-null = end of string */
+            *ppos = pos;
+            return TRUE;
+        }
+
+        if (cch < cchMax - 1) {
+            pwszOut[cch++] = wch;
+            pwszOut[cch] = L'\0';
+        }
+        /* if truncated, keep scanning to stay aligned, just stop copying */
+    }
+
+    return FALSE;                        /* ran off the end, no terminator */
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  KestrelParseRegistryPol                                                    */
+/* ─────────────────────────────────────────────────────────────────────────── */
 
 _Must_inspect_result_
 static HRESULT
 KestrelParseRegistryPol(
-    _In_z_   LPCWSTR            pwszPolPath,
-    _Outptr_result_maybenull_ KESTREL_POL_ENTRY** ppEntries )
+    _In_z_                     LPCWSTR              pwszPolPath,
+    _Outptr_result_maybenull_  KESTREL_POL_ENTRY** ppEntries)
 {
     HRESULT             hr = S_OK;
     HANDLE              hFile = INVALID_HANDLE_VALUE;
@@ -565,11 +630,12 @@ KestrelParseRegistryPol(
     KESTREL_POL_ENTRY* pHead = 0;
     KESTREL_POL_ENTRY** ppTail = &pHead;
     DWORD               cEntries = 0;
+    DWORD               pos = 0;
 
     if (!pwszPolPath || !ppEntries) return E_INVALIDARG;
     *ppEntries = 0;
 
-    /* ── 1. Open Registry.pol from SYSVOL ────────────────────────── */
+    /* ── 1. Open Registry.pol from SYSVOL ─────────────────────────── */
     hFile = CreateFileW(pwszPolPath,
         GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -577,16 +643,15 @@ KestrelParseRegistryPol(
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL,
         0);
-
     if (hFile == INVALID_HANDLE_VALUE) {
         hr = HRESULT_FROM_WIN32(GetLastError());
         KTRACE(L"  CreateFileW failed: 0x%08X", hr);
         return hr;
     }
 
-    /* ── 2. Read entire file into heap buffer ────────────────────── */
+    /* ── 2. Read entire file into a heap buffer ───────────────────── */
     cbFile = GetFileSize(hFile, 0);
-    if (cbFile == INVALID_FILE_SIZE || cbFile < 8) {
+    if (cbFile == INVALID_FILE_SIZE || cbFile < sizeof(g_rgbPolMagic)) {
         hr = E_UNEXPECTED;
         goto Cleanup;
     }
@@ -599,122 +664,91 @@ KestrelParseRegistryPol(
         goto Cleanup;
     }
 
-    /* ── 3. Validate magic header ────────────────────────────────── */
+    /* ── 3. Validate PReg signature ("PReg" + version 1) ──────────── */
     if (memcmp(pBuf, g_rgbPolMagic, sizeof(g_rgbPolMagic)) != 0) {
-        KTRACE(L"  Invalid Registry.pol magic");
+        KTRACE(L"  Invalid Registry.pol signature (expected PReg)");
         hr = E_UNEXPECTED;
         goto Cleanup;
     }
 
-    /* ── 4. Walk entries ─────────────────────────────────────────── */
-    /*
-     * Cursor starts after 8-byte header.
-     * Each entry begins with '[' (0x5B 0x00) and ends with ']' (0x5D 0x00).
-     * We scan for '[' then parse forward.
-     */
-    DWORD pos = 8;
+    /* ── 4. Walk entries ──────────────────────────────────────────── *
+     *   [ key\0 ; value\0 ; type ; size ; data ]
+     *   '[' ']' ';'  are literal UTF-16 chars (2 bytes).
+     *   key, value   are single-null-terminated UTF-16LE.
+     *   type, size   are raw little-endian DWORDs.
+     *   data         is `size` bytes.
+     * On any structural mismatch we resync by scanning forward to the
+     * next '[' (PReg is 2-byte aligned throughout).                    */
+    pos = sizeof(g_rgbPolMagic);
 
-    while (pos + 4 <= cbRead) {
+    while (pos + 2 <= cbRead) {
 
-        /* Find '[' entry start marker (0x5B 0x00) */
+        /* Entry start marker '[' (0x5B 0x00); else resync 2 bytes. */
         if (pBuf[pos] != 0x5B || pBuf[pos + 1] != 0x00) {
             pos += 2;
             continue;
         }
-        pos += 2; /* skip '[' */
-
-        /* ── Read key (UTF-16, double-null terminated) ───────────── */
-        WCHAR wszKey[512] = { 0 };
-        DWORD cchKey = 0;
-
-        while (pos + 3 < cbRead) {
-            WCHAR wch = (WCHAR)(pBuf[pos] | (pBuf[pos + 1] << 8));
-            pos += 2;
-            if (wch == L'\0') {
-                /* Check for double-null (end of string) */
-                WCHAR wchNext = (pos + 1 < cbRead  )
-                    ? (WCHAR)(pBuf[pos] | (pBuf[pos + 1] << 8)) : 0;
-                if (wchNext == L'\0') { pos += 2; break; }
-                /* Single null inside string — skip */
-                continue;
-            }
-            if (cchKey < ARRAYSIZE(wszKey) - 1)
-                wszKey[cchKey++] = wch;
-        }
-
-        /* Expect ';' (0x3B 0x00) */
-        if (pos + 2 > cbRead ||
-            pBuf[pos] != 0x3B || pBuf[pos + 1] != 0x00) continue;
         pos += 2;
 
-        /* ── Read value name (UTF-16, double-null terminated) ───── */
-        WCHAR wszValue[256] = { 0 };
-        DWORD cchValue = 0;
-
-        while (pos + 3 < cbRead) {
-            WCHAR wch = (WCHAR)(pBuf[pos] | (pBuf[pos + 1] << 8));
-            pos += 2;
-            if (wch == L'\0') {
-                WCHAR wchNext = (pos + 1 < cbRead)
-                    ? (WCHAR)(pBuf[pos] | (pBuf[pos + 1] << 8)) : 0;
-                if (wchNext == L'\0') { pos += 2; break; }
-                continue;
-            }
-            if (cchValue < ARRAYSIZE(wszValue) - 1)
-                wszValue[cchValue++] = wch;
-        }
-
-        /* Expect ';' */
-        if (pos + 2 > cbRead ||
-            pBuf[pos] != 0x3B || pBuf[pos + 1] != 0x00) continue;
-        pos += 2;
-
-        /* ── Read type (raw DWORD, 4 bytes) ──────────────────────── */
-        if (pos + 4 > cbRead) break;
-        DWORD dwType = pBuf[pos]
-            | ((DWORD)pBuf[pos + 1] << 8)
-            | ((DWORD)pBuf[pos + 2] << 16)
-            | ((DWORD)pBuf[pos + 3] << 24);
-        pos += 4;
-
-        /* Expect ';' */
-        if (pos + 2 > cbRead ||
-            pBuf[pos] != 0x3B || pBuf[pos + 1] != 0x00) continue;
-        pos += 2;
-
-        /* ── Read size (raw DWORD, 4 bytes) ──────────────────────── */
-        if (pos + 4 > cbRead) break;
-        DWORD dwSize = pBuf[pos]
-            | ((DWORD)pBuf[pos + 1] << 8)
-            | ((DWORD)pBuf[pos + 2] << 16)
-            | ((DWORD)pBuf[pos + 3] << 24);
-        pos += 4;
-
-        /* Expect ';' */
-        if (pos + 2 > cbRead ||
-            pBuf[pos] != 0x3B || pBuf[pos + 1] != 0x00) continue;
-        pos += 2;
-
-        /* ── Read data ───────────────────────────────────────────── */
-        if (dwSize > cbRead - pos) break;
-
+        WCHAR wszKey[512];
+        WCHAR wszValue[256];
+        DWORD dwType = 0;
+        DWORD dwSize = 0;
         DWORD dwData = 0;
+
+        /* ── key + ';' ────────────────────────────────────────────── */
+        if (!KestrelReadPolWStr(pBuf, cbRead, &pos, wszKey, ARRAYSIZE(wszKey)))
+            break;
+        if (pos + 2 > cbRead || pBuf[pos] != 0x3B || pBuf[pos + 1] != 0x00)
+            continue;
+        pos += 2;
+
+        /* ── value + ';' ──────────────────────────────────────────── */
+        if (!KestrelReadPolWStr(pBuf, cbRead, &pos, wszValue, ARRAYSIZE(wszValue)))
+            break;
+        if (pos + 2 > cbRead || pBuf[pos] != 0x3B || pBuf[pos + 1] != 0x00)
+            continue;
+        pos += 2;
+
+        /* ── type (raw DWORD) + ';' ───────────────────────────────── */
+        if (pos + 4 > cbRead) break;
+        dwType = (DWORD)pBuf[pos]
+            | ((DWORD)pBuf[pos + 1] << 8)
+            | ((DWORD)pBuf[pos + 2] << 16)
+            | ((DWORD)pBuf[pos + 3] << 24);
+        pos += 4;
+        if (pos + 2 > cbRead || pBuf[pos] != 0x3B || pBuf[pos + 1] != 0x00)
+            continue;
+        pos += 2;
+
+        /* ── size (raw DWORD) + ';' ───────────────────────────────── */
+        if (pos + 4 > cbRead) break;
+        dwSize = (DWORD)pBuf[pos]
+            | ((DWORD)pBuf[pos + 1] << 8)
+            | ((DWORD)pBuf[pos + 2] << 16)
+            | ((DWORD)pBuf[pos + 3] << 24);
+        pos += 4;
+        if (pos + 2 > cbRead || pBuf[pos] != 0x3B || pBuf[pos + 1] != 0x00)
+            continue;
+        pos += 2;
+
+        /* ── data (size bytes), bounds-checked ────────────────────── */
+        if (dwSize > cbRead - pos) break;
         if (dwType == REG_DWORD && dwSize == 4) {
-            dwData = pBuf[pos]
+            dwData = (DWORD)pBuf[pos]
                 | ((DWORD)pBuf[pos + 1] << 8)
                 | ((DWORD)pBuf[pos + 2] << 16)
                 | ((DWORD)pBuf[pos + 3] << 24);
         }
         pos += dwSize;
 
-        /* Expect ']' (0x5D 0x00) */
-        if (pos + 2 <= cbRead   &&
-            pBuf[pos] == 0x5D && pBuf[pos + 1] == 0x00)
+        /* Optional entry-end ']' (0x5D 0x00). */
+        if (pos + 2 <= cbRead && pBuf[pos] == 0x5D && pBuf[pos + 1] == 0x00)
             pos += 2;
 
-        /* ── Store REG_DWORD entries only ────────────────────────── */
-        if (dwType != REG_DWORD) continue;
-        if (wszKey[0] == L'\0') continue;
+        /* ── Store REG_DWORD entries with a non-empty key only ────── */
+        if (dwType != REG_DWORD || wszKey[0] == L'\0')
+            continue;
 
         KESTREL_POL_ENTRY* pEntry = (KESTREL_POL_ENTRY*)HeapAlloc(
             GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*pEntry));
@@ -724,6 +758,7 @@ KestrelParseRegistryPol(
         StringCchCopyW(pEntry->wszValue, ARRAYSIZE(pEntry->wszValue), wszValue);
         pEntry->dwType = dwType;
         pEntry->dwData = dwData;
+        pEntry->pNext = 0;
 
         KTRACE(L"  POL: [%s] %s = %lu", wszKey, wszValue, dwData);
 
@@ -740,10 +775,9 @@ KestrelParseRegistryPol(
 Cleanup:
     if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
     if (pBuf)  HeapFree(GetProcessHeap(), 0, pBuf);
-    KestrelFreePolEntries(pHead);
+    KestrelFreePolEntries(pHead);   /* frees only on the error path */
     return hr;
 }
-
 
 _Ret_maybenull_
 static const KESTREL_POL_ENTRY *
