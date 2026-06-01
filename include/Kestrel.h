@@ -112,6 +112,48 @@ typedef struct _KESTREL_ACL_SCAN_RESULT {
     DWORD              cObjectsErrored;
 } KESTREL_ACL_SCAN_RESULT;
 
+/* ── Delegation (PART C) ─────────────────────────────────────────── */
+typedef enum _KESTREL_DELEG_KIND {
+    DELEG_UNCONSTRAINED = 0,
+    DELEG_CONSTRAINED,             /* Kerberos-only                       */
+    DELEG_CONSTRAINED_PROTOTRANS,  /* + TRUSTED_TO_AUTH (S4U2Self)        */
+    DELEG_RBCD                     /* resource-based, allowed principal   */
+} KESTREL_DELEG_KIND;
+
+typedef struct _KESTREL_DELEG_FINDING {
+    WCHAR              wszDN[512];
+    WCHAR              wszSam[64];
+    WCHAR              wszObjectClass[64];
+    KESTREL_DELEG_KIND Kind;
+    WCHAR              wszDetail[512];  /* SPN, allowed-SID, or marker     */
+} KESTREL_DELEG_FINDING;
+
+typedef struct _KESTREL_DELEG_SCAN_RESULT {
+    KESTREL_DELEG_FINDING* rgFindings;
+    DWORD                  cFindings;
+    DWORD                  cCapacity;
+    DWORD                  cObjectsScanned;
+    DWORD                  cObjectsErrored;
+} KESTREL_DELEG_SCAN_RESULT;
+
+typedef struct _KESTREL_LAPS_READER {
+    WCHAR wszComputerDN[512];
+    WCHAR wszTrusteeSid[64];
+    WCHAR wszAttr[64];      /* LAPS attr name, "(all properties)", "(GenericAll)" */
+    BOOL  bAllProperties;
+} KESTREL_LAPS_READER;
+
+typedef struct _KESTREL_LAPS_SCAN_RESULT {
+    KESTREL_LAPS_READER* rgReaders;
+    DWORD                cReaders;
+    DWORD                cCapacity;
+    DWORD                cComputersScanned;
+    DWORD                cComputersErrored;
+    BOOL                 bLegacyLapsPresent;
+    BOOL                 bWindowsLapsPresent;
+} KESTREL_LAPS_SCAN_RESULT;
+
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Shared types — KestrelGroup.c
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -207,6 +249,12 @@ typedef struct _KESTREL_GRAPH {
     DWORD                     cDelegationEdges;
 } KESTREL_GRAPH;
 
+typedef enum _KESTREL_REPORT_FORMAT {
+    KESTREL_REPORT_HTML = 0,
+    KESTREL_REPORT_JSON,
+    KESTREL_REPORT_YAML
+} KESTREL_REPORT_FORMAT;
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * adws_scan.c — v0.1
  * ═══════════════════════════════════════════════════════════════════════════ */
@@ -218,6 +266,22 @@ HRESULT RunADWSScan(void);
  * KestrelACL.C — v0.2
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+_Must_inspect_result_ HRESULT KestrelScanDelegation(
+    _In_z_ LPCWSTR pwszDomainNC,
+    _Outptr_ KESTREL_DELEG_SCAN_RESULT** ppResult);
+
+VOID KestrelFreeDelegScanResult(
+    _In_opt_ _Post_ptr_invalid_ KESTREL_DELEG_SCAN_RESULT* pResult);
+
+_Must_inspect_result_ HRESULT KestrelScanLapsReaders(
+    _In_z_ LPCWSTR pwszDomainNC,
+    _In_z_ LPCWSTR pwszConfigNC,
+    _Outptr_ KESTREL_LAPS_SCAN_RESULT** ppResult);
+
+VOID KestrelFreeLapsScanResult(
+    _In_opt_ _Post_ptr_invalid_ KESTREL_LAPS_SCAN_RESULT* pResult);
+
+
 _Must_inspect_result_
 HRESULT KestrelScanACLEdges(
     _In_z_   LPCWSTR                  pwszDomainNC,
@@ -226,6 +290,9 @@ HRESULT KestrelScanACLEdges(
 
 VOID KestrelFreeACLScanResult(
     _In_opt_ _Post_ptr_invalid_ KESTREL_ACL_SCAN_RESULT *pResult);
+
+
+
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * KestrelGroup.c — v0.3
@@ -257,6 +324,15 @@ HRESULT KestrelWriteHTMLReport(
 
 VOID KestrelFreeGraph(
     _In_opt_ _Post_ptr_invalid_ KESTREL_GRAPH *pGraph);
+
+_Must_inspect_result_ HRESULT
+KestrelWriteReport(_In_ const KESTREL_GRAPH* pGraph,
+    _In_z_ LPCWSTR pwszOutputPath,
+    _In_ KESTREL_REPORT_FORMAT eFormat);
+
+_Must_inspect_result_ HRESULT
+KestrelWriteReportAuto(_In_ const KESTREL_GRAPH* pGraph,
+    _In_z_ LPCWSTR pwszOutputPath);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * KestrelPath.c — v0.5 (planned)

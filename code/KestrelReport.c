@@ -21,12 +21,12 @@
 
 #include "../include/Kestrel.h"
 
-/* ─────────────────────────────────────────────────────────────────────────── */
-/*  Cleanup forward declarations                                               */
-/* ─────────────────────────────────────────────────────────────────────────── */
+ /* ─────────────────────────────────────────────────────────────────────────── */
+ /*  Cleanup forward declarations                                               */
+ /* ─────────────────────────────────────────────────────────────────────────── */
 
 VOID KestrelFreeGraph(
-    _In_opt_ _Post_ptr_invalid_ KESTREL_GRAPH *pGraph);
+    _In_opt_ _Post_ptr_invalid_ KESTREL_GRAPH* pGraph);
 
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Internal forward declarations                                              */
@@ -47,7 +47,7 @@ KestrelGraphHash(
  */
 static DWORD
 KestrelGraphGetOrAddNode(
-    _Inout_ KESTREL_GRAPH *pGraph,
+    _Inout_ KESTREL_GRAPH* pGraph,
     _In_z_  LPCWSTR        pwszSid,
     _In_z_  LPCWSTR        pwszDN,
     _In_z_  LPCWSTR        pwszLabel,
@@ -61,7 +61,7 @@ KestrelGraphGetOrAddNode(
 _Must_inspect_result_
 static HRESULT
 KestrelGraphAddEdge(
-    _Inout_       KESTREL_GRAPH          *pGraph,
+    _Inout_       KESTREL_GRAPH* pGraph,
     _In_          DWORD                   iFrom,
     _In_          DWORD                   iTo,
     _In_          KESTREL_GRAPH_EDGE_TYPE Type,
@@ -81,8 +81,8 @@ KestrelClassifyNodeClass(
 _Must_inspect_result_
 static HRESULT
 KestrelGraphAddACLEdges(
-    _Inout_  KESTREL_GRAPH          *pGraph,
-    _In_     KESTREL_ACL_SCAN_RESULT *pACLResult);
+    _Inout_  KESTREL_GRAPH* pGraph,
+    _In_     KESTREL_ACL_SCAN_RESULT* pACLResult);
 
 /*
  * Phase 2 of graph build: add memberOf edges from group scan.
@@ -90,17 +90,51 @@ KestrelGraphAddACLEdges(
 _Must_inspect_result_
 static HRESULT
 KestrelGraphAddMemberEdges(
-    _Inout_  KESTREL_GRAPH            *pGraph,
-    _In_     KESTREL_GROUP_SCAN_RESULT *pGroupResult);
+    _Inout_  KESTREL_GRAPH* pGraph,
+    _In_     KESTREL_GROUP_SCAN_RESULT* pGroupResult);
 
 /*
- * Write the complete graph as JSON embedded in HTML to a file.
+ * WCHAR -> UTF-8 with JSON string escaping. Emits the *inner* bytes of a
+ * string scalar; the caller writes the surrounding quotes. Handles surrogate
+ * pairs and control characters. Shared by the JSON, HTML-embedded and YAML
+ * (double-quoted scalar) paths.
+ */
+static VOID
+KestrelEmitJsonStringW(
+    _In_   FILE* pFile,
+    _In_z_ LPCWSTR  pwsz);
+
+/*
+ * Emit the graph as a JSON object body: { "nodes": [...], "edges": [...] }.
+ * bAsJsAssignment = TRUE wraps it as `const KESTREL_GRAPH = {...};` for
+ * embedding inside the HTML <script>. FALSE emits a standalone .json document.
  */
 _Must_inspect_result_
 static HRESULT
-KestrelWriteGraphJSON(
-    _In_     const KESTREL_GRAPH *pGraph,
-    _In_     FILE                *pFile);
+KestrelEmitGraphJson(
+    _In_ FILE* pFile,
+    _In_ const KESTREL_GRAPH* pGraph,
+    _In_ BOOL                 bAsJsAssignment);
+
+/*
+ * Per-format body writers. Each operates on an already-open *binary* stream;
+ * file open/close and the run summary are owned by KestrelWriteReport.
+ */
+_Must_inspect_result_ static HRESULT
+KestrelEmitHtml(_In_ const KESTREL_GRAPH* pGraph, _In_ FILE* pFile);
+
+_Must_inspect_result_ static HRESULT
+KestrelEmitJson(_In_ const KESTREL_GRAPH* pGraph, _In_ FILE* pFile);
+
+_Must_inspect_result_ static HRESULT
+KestrelEmitYaml(_In_ const KESTREL_GRAPH* pGraph, _In_ FILE* pFile);
+
+/*
+ * Pick an output format from the file extension (.json / .yaml / .yml,
+ * otherwise HTML).
+ */
+static KESTREL_REPORT_FORMAT
+KestrelGuessFormat(_In_z_ LPCWSTR pwszPath);
 
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -120,32 +154,32 @@ KestrelWriteGraphJSON(
 _Must_inspect_result_
 HRESULT
 KestrelBuildGraph(
-    _In_opt_ KESTREL_ACL_SCAN_RESULT    *pACLResult,
-    _In_opt_ KESTREL_GROUP_SCAN_RESULT  *pGroupResult,
-    _Outptr_ KESTREL_GRAPH             **ppGraph)
+    _In_opt_ KESTREL_ACL_SCAN_RESULT* pACLResult,
+    _In_opt_ KESTREL_GROUP_SCAN_RESULT* pGroupResult,
+    _Outptr_ KESTREL_GRAPH** ppGraph)
 {
-    HRESULT        hr     = S_OK;
-    KESTREL_GRAPH *pGraph = NULL;
+    HRESULT        hr = S_OK;
+    KESTREL_GRAPH* pGraph = NULL;
 
     if (!ppGraph) return E_INVALIDARG;
     *ppGraph = NULL;
 
     /* Allocate graph — hash table is zero-initialized (free slots)  */
-    pGraph = (KESTREL_GRAPH *)HeapAlloc(GetProcessHeap(),
-                                         HEAP_ZERO_MEMORY, sizeof(*pGraph));
+    pGraph = (KESTREL_GRAPH*)HeapAlloc(GetProcessHeap(),
+        HEAP_ZERO_MEMORY, sizeof(*pGraph));
     if (!pGraph) return E_OUTOFMEMORY;
 
     /* Pre-allocate node and edge arrays */
     pGraph->cNodesCapacity = 1024;
-    pGraph->pNodes = (KESTREL_GRAPH_NODE *)HeapAlloc(GetProcessHeap(),
-                        HEAP_ZERO_MEMORY,
-                        pGraph->cNodesCapacity * sizeof(KESTREL_GRAPH_NODE));
+    pGraph->pNodes = (KESTREL_GRAPH_NODE*)HeapAlloc(GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        pGraph->cNodesCapacity * sizeof(KESTREL_GRAPH_NODE));
     if (!pGraph->pNodes) { hr = E_OUTOFMEMORY; goto Cleanup; }
 
     pGraph->cEdgesCapacity = KESTREL_EDGE_INITIAL_CAP;
-    pGraph->pEdges = (KESTREL_GRAPH_EDGE *)HeapAlloc(GetProcessHeap(),
-                        HEAP_ZERO_MEMORY,
-                        pGraph->cEdgesCapacity * sizeof(KESTREL_GRAPH_EDGE));
+    pGraph->pEdges = (KESTREL_GRAPH_EDGE*)HeapAlloc(GetProcessHeap(),
+        HEAP_ZERO_MEMORY,
+        pGraph->cEdgesCapacity * sizeof(KESTREL_GRAPH_EDGE));
     if (!pGraph->pEdges) { hr = E_OUTOFMEMORY; goto Cleanup; }
 
     wprintf(L"\n[*] Building graph...\n");
@@ -168,7 +202,7 @@ KestrelBuildGraph(
     wprintf(L"  [*] Total edges:      %lu\n", pGraph->cEdges);
 
     *ppGraph = pGraph;
-    pGraph   = NULL;
+    pGraph = NULL;
 
 Cleanup:
     if (pGraph) KestrelFreeGraph(pGraph);
@@ -176,37 +210,27 @@ Cleanup:
 }
 
 /*
- * KestrelWriteHTMLReport
- * Writes self-contained HTML report to pwszOutputPath.
- * The file embeds D3.js from cdnjs and all graph data as inline JSON.
+ * KestrelEmitHtml
+ * Writes a self-contained HTML report to an already-open byte stream.
+ * Embeds D3.js from cdnjs and all graph data as inline JSON.
+ *
+ * The stream MUST be opened in binary mode ("wb"). Every write below is a
+ * narrow byte function (fputs / fputc / fprintf). Opening the stream with
+ * ccs=UTF-8 puts it into *wide* orientation, after which these narrow writes
+ * no longer land — which is exactly why the report came out at 0 bytes.
+ * The open/close mode now lives in one place: KestrelWriteReport.
+ *
+ * Formatting rule kept from before: fprintf only where a %-conversion has an
+ * argument; everything else goes through fputs, otherwise MSVC C4477 fires on
+ * a literal '%' in the embedded CSS (e.g. "50%").
  */
- /*
-  * KestrelWriteHTMLReport — исправленная версия.
-  *
-  * Замени функцию KestrelWriteHTMLReport в KestrelReport.c целиком.
-  *
-  * Правило: fprintf только там где есть %lu/%s с аргументами.
-  * Всё остальное — fputs. Причина: MSVC C4477 — видит "50%" в CSS
-  * и интерпретирует % как начало format specifier.
-  */
-
 _Must_inspect_result_
-HRESULT
-KestrelWriteHTMLReport(
-    _In_     const KESTREL_GRAPH* pGraph,
-    _In_z_   LPCWSTR              pwszOutputPath)
+static HRESULT
+KestrelEmitHtml(
+    _In_ const KESTREL_GRAPH* pGraph,
+    _In_ FILE* pFile)
 {
-
-    HRESULT hr = S_OK;   /* ← добавить */
-    if (!pGraph || !pwszOutputPath) return E_INVALIDARG;
-
-    wprintf(L"\n[*] Writing HTML report: %s\n", pwszOutputPath);
-
-    FILE* pFile = _wfopen(pwszOutputPath, L"w, ccs=UTF-8");
-    if (!pFile) {
-        wprintf(L"[!] Failed to open output file\n");
-        return HRESULT_FROM_WIN32(ERROR_OPEN_FAILED);
-    }
+    HRESULT hr = S_OK;
 
     /* ── HTML header + CSS ─────────────────────────────────────────── */
     fputs("<!DOCTYPE html>\n", pFile);
@@ -297,11 +321,8 @@ KestrelWriteHTMLReport(
 
     /* ── Embedded graph data + D3.js ───────────────────────────────── */
     fputs("<script>\n", pFile);
-    hr = KestrelWriteGraphJSON(pGraph, pFile);
-    if (FAILED(hr)) {
-        fclose(pFile);
-        return hr;
-    }       
+    hr = KestrelEmitGraphJson(pFile, pGraph, TRUE /* as JS assignment */);
+    if (FAILED(hr)) return hr;   /* file is closed by KestrelWriteReport */
 
     /* D3.js visualization — все через fputs (см. KestrelJS_block.c) */
     fputs("const NODE_COLORS = {\n", pFile);
@@ -435,12 +456,6 @@ KestrelWriteHTMLReport(
     /* ── Close HTML ────────────────────────────────────────────────── */
     fputs("</script>\n</body>\n</html>\n", pFile);
 
-    fclose(pFile);
-
-    wprintf(L"  [+] Report written — %lu nodes, %lu edges\n",
-        pGraph->cNodes, pGraph->cEdges);
-    wprintf(L"  [+] Open in any browser to view the graph\n");
-
     return S_OK;
 }
 
@@ -460,7 +475,7 @@ KestrelGraphHash(
 
 static DWORD
 KestrelGraphGetOrAddNode(
-    _Inout_ KESTREL_GRAPH     *pGraph,
+    _Inout_ KESTREL_GRAPH* pGraph,
     _In_z_  LPCWSTR            pwszSid,
     _In_z_  LPCWSTR            pwszDN,
     _In_z_  LPCWSTR            pwszLabel,
@@ -483,31 +498,32 @@ KestrelGraphGetOrAddNode(
             /* Grow node array if needed */
             if (pGraph->cNodes == pGraph->cNodesCapacity) {
                 DWORD cNew = pGraph->cNodesCapacity * 2;
-                KESTREL_GRAPH_NODE *pNew = (KESTREL_GRAPH_NODE *)HeapReAlloc(
-                        GetProcessHeap(), HEAP_ZERO_MEMORY,
-                        pGraph->pNodes,
-                        cNew * sizeof(KESTREL_GRAPH_NODE));
+                KESTREL_GRAPH_NODE* pNew = (KESTREL_GRAPH_NODE*)HeapReAlloc(
+                    GetProcessHeap(), HEAP_ZERO_MEMORY,
+                    pGraph->pNodes,
+                    cNew * sizeof(KESTREL_GRAPH_NODE));
                 if (!pNew) return MAXDWORD;
-                pGraph->pNodes         = pNew;
+                pGraph->pNodes = pNew;
                 pGraph->cNodesCapacity = cNew;
             }
 
             DWORD iNode = pGraph->cNodes++;
-            KESTREL_GRAPH_NODE *pNode = &pGraph->pNodes[iNode];
+            KESTREL_GRAPH_NODE* pNode = &pGraph->pNodes[iNode];
 
-            StringCchCopyW(pNode->wszSid,   ARRAYSIZE(pNode->wszSid),   pwszSid);
-            StringCchCopyW(pNode->wszDN,    ARRAYSIZE(pNode->wszDN),    pwszDN);
+            StringCchCopyW(pNode->wszSid, ARRAYSIZE(pNode->wszSid), pwszSid);
+            StringCchCopyW(pNode->wszDN, ARRAYSIZE(pNode->wszDN), pwszDN);
             StringCchCopyW(pNode->wszLabel, ARRAYSIZE(pNode->wszLabel), pwszLabel);
-            pNode->Class    = Class;
+            pNode->Class = Class;
             pNode->bEnabled = bEnabled;
 
             StringCchCopyW(pGraph->rgHash[s].wszSid,
-                           ARRAYSIZE(pGraph->rgHash[s].wszSid), pwszSid);
+                ARRAYSIZE(pGraph->rgHash[s].wszSid), pwszSid);
             pGraph->rgHash[s].iNode = iNode;
 
             return iNode;
 
-        } else if (_wcsicmp(pGraph->rgHash[s].wszSid, pwszSid) == 0) {
+        }
+        else if (_wcsicmp(pGraph->rgHash[s].wszSid, pwszSid) == 0) {
             /* Found existing node */
             return pGraph->rgHash[s].iNode;
         }
@@ -519,7 +535,7 @@ KestrelGraphGetOrAddNode(
 _Must_inspect_result_
 static HRESULT
 KestrelGraphAddEdge(
-    _Inout_  KESTREL_GRAPH          *pGraph,
+    _Inout_  KESTREL_GRAPH* pGraph,
     _In_     DWORD                   iFrom,
     _In_     DWORD                   iTo,
     _In_     KESTREL_GRAPH_EDGE_TYPE Type,
@@ -531,19 +547,19 @@ KestrelGraphAddEdge(
     /* Grow edge array if needed */
     if (pGraph->cEdges == pGraph->cEdgesCapacity) {
         DWORD cNew = pGraph->cEdgesCapacity * 2;
-        KESTREL_GRAPH_EDGE *pNew = (KESTREL_GRAPH_EDGE *)HeapReAlloc(
-                GetProcessHeap(), HEAP_ZERO_MEMORY,
-                pGraph->pEdges,
-                cNew * sizeof(KESTREL_GRAPH_EDGE));
+        KESTREL_GRAPH_EDGE* pNew = (KESTREL_GRAPH_EDGE*)HeapReAlloc(
+            GetProcessHeap(), HEAP_ZERO_MEMORY,
+            pGraph->pEdges,
+            cNew * sizeof(KESTREL_GRAPH_EDGE));
         if (!pNew) return E_OUTOFMEMORY;
-        pGraph->pEdges         = pNew;
+        pGraph->pEdges = pNew;
         pGraph->cEdgesCapacity = cNew;
     }
 
-    KESTREL_GRAPH_EDGE *pEdge = &pGraph->pEdges[pGraph->cEdges++];
+    KESTREL_GRAPH_EDGE* pEdge = &pGraph->pEdges[pGraph->cEdges++];
     pEdge->iFrom = iFrom;
-    pEdge->iTo   = iTo;
-    pEdge->Type  = Type;
+    pEdge->iTo = iTo;
+    pEdge->Type = Type;
     pEdge->bDeny = bDeny;
 
     if (pwszDetail)
@@ -557,21 +573,21 @@ KestrelClassifyNodeClass(
     _In_z_ LPCWSTR pwszClass)
 {
     if (!pwszClass) return NODE_CLASS_UNKNOWN;
-    if (_wcsicmp(pwszClass, L"user")                 == 0) return NODE_CLASS_USER;
-    if (_wcsicmp(pwszClass, L"group")                == 0) return NODE_CLASS_GROUP;
-    if (_wcsicmp(pwszClass, L"computer")             == 0) return NODE_CLASS_COMPUTER;
-    if (_wcsicmp(pwszClass, L"organizationalUnit")   == 0) return NODE_CLASS_OU;
-    if (_wcsicmp(pwszClass, L"domainDNS")            == 0) return NODE_CLASS_DOMAIN;
+    if (_wcsicmp(pwszClass, L"user") == 0) return NODE_CLASS_USER;
+    if (_wcsicmp(pwszClass, L"group") == 0) return NODE_CLASS_GROUP;
+    if (_wcsicmp(pwszClass, L"computer") == 0) return NODE_CLASS_COMPUTER;
+    if (_wcsicmp(pwszClass, L"organizationalUnit") == 0) return NODE_CLASS_OU;
+    if (_wcsicmp(pwszClass, L"domainDNS") == 0) return NODE_CLASS_DOMAIN;
     if (_wcsicmp(pwszClass, L"groupPolicyContainer") == 0) return NODE_CLASS_GPO;
-    if (_wcsicmp(pwszClass, L"container")            == 0) return NODE_CLASS_CONTAINER;
+    if (_wcsicmp(pwszClass, L"container") == 0) return NODE_CLASS_CONTAINER;
     return NODE_CLASS_UNKNOWN;
 }
 
 _Must_inspect_result_
 static HRESULT
 KestrelGraphAddACLEdges(
-    _Inout_  KESTREL_GRAPH           *pGraph,
-    _In_     KESTREL_ACL_SCAN_RESULT *pACLResult)
+    _Inout_  KESTREL_GRAPH* pGraph,
+    _In_     KESTREL_ACL_SCAN_RESULT* pACLResult)
 {
     /* Map KESTREL_ACL_EDGE_TYPE → KESTREL_GRAPH_EDGE_TYPE */
     static const KESTREL_GRAPH_EDGE_TYPE rgTypeMap[] = {
@@ -588,32 +604,39 @@ KestrelGraphAddACLEdges(
     };
 
     for (DWORD i = 0; i < pACLResult->cEdges; i++) {
-        KESTREL_ACL_EDGE *pE = &pACLResult->rgEdges[i];
+        KESTREL_ACL_EDGE* pE = &pACLResult->rgEdges[i];
 
-        /* Trustee node — we only have SID, no DN/label yet */
+        /* Trustee node — keyed by SID (we only have the SID, no DN/label) */
         DWORD iFrom = KestrelGraphGetOrAddNode(pGraph,
-                pE->wszTrusteeSid, L"", pE->wszTrusteeSid,
-                NODE_CLASS_UNKNOWN, TRUE, TRUE);
+            pE->wszTrusteeSid, L"", pE->wszTrusteeSid,
+            NODE_CLASS_UNKNOWN, TRUE, TRUE);
 
-        /* Target node */
+        /* Target node — keyed by DN. The edge carries no SID for the target,
+           so the DN is its stable identity. Keying it by the trustee SID
+           (the previous behaviour) collapsed source and target into one node
+           and turned every ACL edge into a self-loop. */
         DWORD iTo = KestrelGraphGetOrAddNode(pGraph,
-                pE->wszTrusteeSid, /* placeholder — target has no SID in edge */
-                pE->wszTargetDN, pE->wszTargetDN,
-                KestrelClassifyNodeClass(pE->wszObjectClass),
-                TRUE, TRUE);
+            pE->wszTargetDN, pE->wszTargetDN, pE->wszTargetDN,
+            KestrelClassifyNodeClass(pE->wszObjectClass),
+            TRUE, TRUE);
 
-        /* TODO: target node should be keyed by DN not SID
-                 once we have SID for target objects, update key */
+        /* Known limitation: a target keyed by DN is not merged with the same
+           principal seen via membership (keyed by SID); DN<->SID resolution
+           would be required to dedup, which the passive data set does not
+           provide. */
+
+        if (iFrom == MAXDWORD || iTo == MAXDWORD)
+            continue;   /* empty SID/DN — skip this edge, don't abort the build */
 
         KESTREL_GRAPH_EDGE_TYPE eType =
             (pE->EdgeType < ARRAYSIZE(rgTypeMap))
             ? rgTypeMap[pE->EdgeType] : GEDGE_ACL_GENERIC_ALL;
 
         LPCWSTR pwszDetail = pE->wszRightName[0]
-                           ? pE->wszRightName : pE->wszRightGuid;
+            ? pE->wszRightName : pE->wszRightGuid;
 
         HRESULT hr = KestrelGraphAddEdge(pGraph, iFrom, iTo,
-                                          eType, pwszDetail, pE->bDeny);
+            eType, pwszDetail, pE->bDeny);
         if (FAILED(hr)) return hr;
 
         pGraph->cACLEdges++;
@@ -625,33 +648,39 @@ KestrelGraphAddACLEdges(
 _Must_inspect_result_
 static HRESULT
 KestrelGraphAddMemberEdges(
-    _Inout_  KESTREL_GRAPH             *pGraph,
-    _In_     KESTREL_GROUP_SCAN_RESULT *pGroupResult)
+    _Inout_  KESTREL_GRAPH* pGraph,
+    _In_     KESTREL_GROUP_SCAN_RESULT* pGroupResult)
 {
-    for (KESTREL_GROUP_RESULT *pGroup = pGroupResult->pGroups;
-         pGroup; pGroup = pGroup->pNext) {
+    for (KESTREL_GROUP_RESULT* pGroup = pGroupResult->pGroups;
+        pGroup; pGroup = pGroup->pNext) {
 
         /* Group node */
         DWORD iGroup = KestrelGraphGetOrAddNode(pGraph,
-                pGroup->wszGroupDN, /* use DN as key if no SID */
-                pGroup->wszGroupDN,
-                pGroup->wszGroupName,
-                NODE_CLASS_GROUP, TRUE, TRUE);
+            pGroup->wszGroupDN, /* use DN as key if no SID */
+            pGroup->wszGroupDN,
+            pGroup->wszGroupName,
+            NODE_CLASS_GROUP, TRUE, TRUE);
+
+        if (iGroup == MAXDWORD)
+            continue;   /* group has no usable key — skip it */
 
         /* Member nodes */
-        for (KESTREL_MEMBER *pMember = pGroup->pMembers;
-             pMember; pMember = pMember->pNext) {
+        for (KESTREL_MEMBER* pMember = pGroup->pMembers;
+            pMember; pMember = pMember->pNext) {
 
             DWORD iMember = KestrelGraphGetOrAddNode(pGraph,
-                    pMember->wszSid,
-                    pMember->wszDN,
-                    pMember->wszSAM[0] ? pMember->wszSAM : pMember->wszDN,
-                    KestrelClassifyNodeClass(pMember->wszClass),
-                    pMember->bEnabled, TRUE);
+                pMember->wszSid,
+                pMember->wszDN,
+                pMember->wszSAM[0] ? pMember->wszSAM : pMember->wszDN,
+                KestrelClassifyNodeClass(pMember->wszClass),
+                pMember->bEnabled, TRUE);
+
+            if (iMember == MAXDWORD)
+                continue;   /* member has no usable key (e.g. empty SID) — skip */
 
             /* member → memberOf → group */
             HRESULT hr = KestrelGraphAddEdge(pGraph, iMember, iGroup,
-                                              GEDGE_MEMBER_OF, L"", FALSE);
+                GEDGE_MEMBER_OF, L"", FALSE);
             if (FAILED(hr)) return hr;
 
             pGraph->cMemberEdges++;
@@ -667,91 +696,312 @@ KestrelGraphAddMemberEdges(
 
 VOID
 KestrelFreeGraph(
-    _In_opt_ _Post_ptr_invalid_ KESTREL_GRAPH *pGraph)
+    _In_opt_ _Post_ptr_invalid_ KESTREL_GRAPH* pGraph)
 {
     if (!pGraph) return;
     if (pGraph->pNodes) HeapFree(GetProcessHeap(), 0, pGraph->pNodes);
     if (pGraph->pEdges) HeapFree(GetProcessHeap(), 0, pGraph->pEdges);
     HeapFree(GetProcessHeap(), 0, pGraph);
 }
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  Serialization helpers (shared by JSON / HTML-embed / YAML)                 */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+static VOID
+KestrelEmitJsonStringW(
+    _In_   FILE* pFile,
+    _In_z_ LPCWSTR  pwsz)
+{
+    if (!pwsz) return;
+
+    for (const WCHAR* p = pwsz; *p; p++) {
+        DWORD cp = (DWORD)(WORD)*p;
+
+        /* Decode a UTF-16 surrogate pair into a scalar code point.
+           Lone surrogates are replaced with U+FFFD so output stays valid. */
+        if (cp >= 0xD800 && cp <= 0xDBFF) {
+            WORD lo = (WORD) * (p + 1);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                cp = 0x10000u + ((cp - 0xD800u) << 10) + (lo - 0xDC00u);
+                p++;
+            }
+            else {
+                cp = 0xFFFD;
+            }
+        }
+        else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            cp = 0xFFFD;
+        }
+
+        /* JSON escaping for quotes, backslash and the named control chars. */
+        switch (cp) {
+        case L'"':  fputs("\\\"", pFile); continue;
+        case L'\\': fputs("\\\\", pFile); continue;
+        case 0x08:  fputs("\\b", pFile); continue;
+        case 0x09:  fputs("\\t", pFile); continue;
+        case 0x0A:  fputs("\\n", pFile); continue;
+        case 0x0C:  fputs("\\f", pFile); continue;
+        case 0x0D:  fputs("\\r", pFile); continue;
+        default: break;
+        }
+        if (cp < 0x20) {
+            fprintf(pFile, "\\u%04lx", cp);
+            continue;
+        }
+
+        /* UTF-8 encode everything else (this is where the old (char)*p cast
+           silently corrupted non-ASCII labels — Cyrillic, Uzbek, etc.). */
+        if (cp < 0x80) {
+            fputc((char)cp, pFile);
+        }
+        else if (cp < 0x800) {
+            fputc((char)(0xC0 | (cp >> 6)), pFile);
+            fputc((char)(0x80 | (cp & 0x3F)), pFile);
+        }
+        else if (cp < 0x10000) {
+            fputc((char)(0xE0 | (cp >> 12)), pFile);
+            fputc((char)(0x80 | ((cp >> 6) & 0x3F)), pFile);
+            fputc((char)(0x80 | (cp & 0x3F)), pFile);
+        }
+        else {
+            fputc((char)(0xF0 | (cp >> 18)), pFile);
+            fputc((char)(0x80 | ((cp >> 12) & 0x3F)), pFile);
+            fputc((char)(0x80 | ((cp >> 6) & 0x3F)), pFile);
+            fputc((char)(0x80 | (cp & 0x3F)), pFile);
+        }
+    }
+}
+
+/* Node-class / edge-type label tables — shared by every serializer. */
+static const char* g_rgszNodeClass[] = {
+    "unknown", "user", "group", "computer",
+    "ou", "domain", "gpo", "container"
+};
+static const char* g_rgszEdgeType[] = {
+    "GenericAll", "WriteDACL", "WriteOwner", "GenericWrite",
+    "ExtendedRight", "WriteProperty",
+    "MemberOf",
+    "Delegation_Unconstrained", "Delegation_Constrained", "Delegation_S4U2Self"
+};
+
 _Must_inspect_result_
 static HRESULT
-KestrelWriteGraphJSON(
+KestrelEmitGraphJson(
+    _In_ FILE* pFile,
     _In_ const KESTREL_GRAPH* pGraph,
-    _In_ FILE* pFile)
+    _In_ BOOL                 bAsJsAssignment)
 {
-    static const char* rgszNodeClass[] = {
-        "unknown", "user", "group", "computer",
-        "ou", "domain", "gpo", "container"
-    };
+    if (bAsJsAssignment)
+        fputs("const KESTREL_GRAPH = ", pFile);
 
-    static const char* rgszEdgeType[] = {
-        "GenericAll", "WriteDACL", "WriteOwner", "GenericWrite",
-        "ExtendedRight", "WriteProperty",
-        "MemberOf",
-        "Delegation_Unconstrained", "Delegation_Constrained", "Delegation_S4U2Self"
-    };
-
-    fprintf(pFile, "const KESTREL_GRAPH = {\n");
+    fputs("{\n", pFile);
 
     /* ── Nodes ─────────────────────────────────────────────────────── */
-    fprintf(pFile, "  nodes: [\n");
+    fputs("  \"nodes\": [\n", pFile);
     for (DWORD i = 0; i < pGraph->cNodes; i++) {
         const KESTREL_GRAPH_NODE* pN = &pGraph->pNodes[i];
 
-        const char* pszClass = (pN->Class < ARRAYSIZE(rgszNodeClass))
-            ? rgszNodeClass[pN->Class] : "unknown";
+        const char* pszClass = (pN->Class < ARRAYSIZE(g_rgszNodeClass))
+            ? g_rgszNodeClass[pN->Class] : "unknown";
 
-        /* Escape backslashes in DN for JSON */
-        fprintf(pFile, "    { \"id\": %lu, ", i);
-        fprintf(pFile, "\"sid\": \"");
-
-        /* Write SID — safe, no special chars */
-        for (const WCHAR* p = pN->wszSid; *p; p++)
-            fputc((char)*p, pFile);
-
-        fprintf(pFile, "\", \"label\": \"");
-
-        /* Write label — escape quotes */
-        for (const WCHAR* p = pN->wszLabel; *p; p++) {
-            if (*p == L'"')  fputs("\\\"", pFile);
-            else if (*p == L'\\') fputs("\\\\", pFile);
-            else fputc((char)*p, pFile);
-        }
-
-        fprintf(pFile, "\", \"class\": \"%s\", ", pszClass);
-        fprintf(pFile, "\"enabled\": %s, ", pN->bEnabled ? "true" : "false");
-        fprintf(pFile, "\"highValue\": %s }%s\n",
+        fprintf(pFile, "    { \"id\": %lu, \"sid\": \"", i);
+        KestrelEmitJsonStringW(pFile, pN->wszSid);
+        fputs("\", \"label\": \"", pFile);
+        KestrelEmitJsonStringW(pFile, pN->wszLabel);
+        fprintf(pFile,
+            "\", \"class\": \"%s\", \"enabled\": %s, \"highValue\": %s }%s\n",
+            pszClass,
+            pN->bEnabled ? "true" : "false",
             pN->bHighValue ? "true" : "false",
-            i < pGraph->cNodes - 1 ? "," : "");
+            (i + 1 < pGraph->cNodes) ? "," : "");
     }
-    fprintf(pFile, "  ],\n");
+    fputs("  ],\n", pFile);
 
     /* ── Edges ─────────────────────────────────────────────────────── */
-    fprintf(pFile, "  edges: [\n");
+    fputs("  \"edges\": [\n", pFile);
     for (DWORD i = 0; i < pGraph->cEdges; i++) {
         const KESTREL_GRAPH_EDGE* pE = &pGraph->pEdges[i];
 
-        const char* pszType = (pE->Type < ARRAYSIZE(rgszEdgeType))
-            ? rgszEdgeType[pE->Type] : "Unknown";
+        const char* pszType = (pE->Type < ARRAYSIZE(g_rgszEdgeType))
+            ? g_rgszEdgeType[pE->Type] : "Unknown";
 
-        fprintf(pFile, "    { \"source\": %lu, \"target\": %lu, ",
-            pE->iFrom, pE->iTo);
-        fprintf(pFile, "\"type\": \"%s\", ", pszType);
-        fprintf(pFile, "\"detail\": \"");
-
-        for (const WCHAR* p = pE->wszDetail; *p; p++) {
-            if (*p == L'"')  fputs("\\\"", pFile);
-            else if (*p == L'\\') fputs("\\\\", pFile);
-            else fputc((char)*p, pFile);
-        }
-
+        fprintf(pFile,
+            "    { \"source\": %lu, \"target\": %lu, \"type\": \"%s\", \"detail\": \"",
+            pE->iFrom, pE->iTo, pszType);
+        KestrelEmitJsonStringW(pFile, pE->wszDetail);
         fprintf(pFile, "\", \"deny\": %s }%s\n",
             pE->bDeny ? "true" : "false",
-            i < pGraph->cEdges - 1 ? "," : "");
+            (i + 1 < pGraph->cEdges) ? "," : "");
     }
-    fprintf(pFile, "  ]\n");
-    fprintf(pFile, "};\n\n");
+    fputs("  ]\n", pFile);
+
+    fputs(bAsJsAssignment ? "};\n\n" : "}\n", pFile);
+    return S_OK;
+}
+
+_Must_inspect_result_
+static HRESULT
+KestrelEmitJson(
+    _In_ const KESTREL_GRAPH* pGraph,
+    _In_ FILE* pFile)
+{
+    return KestrelEmitGraphJson(pFile, pGraph, FALSE);
+}
+
+_Must_inspect_result_
+static HRESULT
+KestrelEmitYaml(
+    _In_ const KESTREL_GRAPH* pGraph,
+    _In_ FILE* pFile)
+{
+    fputs("# Kestrel AD security graph\n", pFile);
+    fputs("summary:\n", pFile);
+    fprintf(pFile, "  nodes: %lu\n", pGraph->cNodes);
+    fprintf(pFile, "  edges: %lu\n", pGraph->cEdges);
+    fprintf(pFile, "  aclEdges: %lu\n", pGraph->cACLEdges);
+    fprintf(pFile, "  memberEdges: %lu\n", pGraph->cMemberEdges);
+
+    /* String scalars are double-quoted; YAML 1.2 accepts JSON-style escapes,
+       so the same escaper is reused. class/type are known-safe bare tokens. */
+    fputs("nodes:\n", pFile);
+    for (DWORD i = 0; i < pGraph->cNodes; i++) {
+        const KESTREL_GRAPH_NODE* pN = &pGraph->pNodes[i];
+
+        const char* pszClass = (pN->Class < ARRAYSIZE(g_rgszNodeClass))
+            ? g_rgszNodeClass[pN->Class] : "unknown";
+
+        fprintf(pFile, "  - id: %lu\n", i);
+        fputs("    sid: \"", pFile);
+        KestrelEmitJsonStringW(pFile, pN->wszSid);
+        fputs("\"\n", pFile);
+        fputs("    label: \"", pFile);
+        KestrelEmitJsonStringW(pFile, pN->wszLabel);
+        fputs("\"\n", pFile);
+        fprintf(pFile, "    class: %s\n", pszClass);
+        fprintf(pFile, "    enabled: %s\n", pN->bEnabled ? "true" : "false");
+        fprintf(pFile, "    highValue: %s\n", pN->bHighValue ? "true" : "false");
+    }
+
+    fputs("edges:\n", pFile);
+    for (DWORD i = 0; i < pGraph->cEdges; i++) {
+        const KESTREL_GRAPH_EDGE* pE = &pGraph->pEdges[i];
+
+        const char* pszType = (pE->Type < ARRAYSIZE(g_rgszEdgeType))
+            ? g_rgszEdgeType[pE->Type] : "Unknown";
+
+        fprintf(pFile, "  - source: %lu\n", pE->iFrom);
+        fprintf(pFile, "    target: %lu\n", pE->iTo);
+        fprintf(pFile, "    type: %s\n", pszType);
+        fputs("    detail: \"", pFile);
+        KestrelEmitJsonStringW(pFile, pE->wszDetail);
+        fputs("\"\n", pFile);
+        fprintf(pFile, "    deny: %s\n", pE->bDeny ? "true" : "false");
+    }
 
     return S_OK;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  Public report API: open once, dispatch by format, close once              */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+static KESTREL_REPORT_FORMAT
+KestrelGuessFormat(
+    _In_z_ LPCWSTR pwszPath)
+{
+    const WCHAR* pwszDot = wcsrchr(pwszPath, L'.');
+    if (pwszDot) {
+        if (_wcsicmp(pwszDot, L".json") == 0) return KESTREL_REPORT_JSON;
+        if (_wcsicmp(pwszDot, L".yaml") == 0) return KESTREL_REPORT_YAML;
+        if (_wcsicmp(pwszDot, L".yml") == 0) return KESTREL_REPORT_YAML;
+    }
+    return KESTREL_REPORT_HTML;
+}
+
+/*
+ * KestrelWriteReport
+ * Single entry point for all report formats. Owns file open/close and the
+ * run summary; each format writer just streams content to the open handle.
+ */
+_Must_inspect_result_
+HRESULT
+KestrelWriteReport(
+    _In_   const KESTREL_GRAPH* pGraph,
+    _In_z_ LPCWSTR               pwszOutputPath,
+    _In_   KESTREL_REPORT_FORMAT eFormat)
+{
+    HRESULT      hr;
+    const WCHAR* pwszKind;
+
+    if (!pGraph || !pwszOutputPath) return E_INVALIDARG;
+
+    switch (eFormat) {
+    case KESTREL_REPORT_HTML: pwszKind = L"HTML"; break;
+    case KESTREL_REPORT_JSON: pwszKind = L"JSON"; break;
+    case KESTREL_REPORT_YAML: pwszKind = L"YAML"; break;
+    default: return E_INVALIDARG;
+    }
+
+    wprintf(L"\n[*] Writing %s report: %s\n", pwszKind, pwszOutputPath);
+
+    /* Binary mode is mandatory. Every writer emits narrow bytes; opening with
+       ccs=UTF-8 sets wide orientation and silently drops them — the original
+       0-byte bug. UTF-8 is produced explicitly by KestrelEmitJsonStringW. */
+    FILE* pFile = _wfopen(pwszOutputPath, L"wb");
+    if (!pFile) {
+        wprintf(L"[!] Failed to open output file\n");
+        return HRESULT_FROM_WIN32(ERROR_OPEN_FAILED);
+    }
+
+    switch (eFormat) {
+    case KESTREL_REPORT_JSON: hr = KestrelEmitJson(pGraph, pFile); break;
+    case KESTREL_REPORT_YAML: hr = KestrelEmitYaml(pGraph, pFile); break;
+    default:                  hr = KestrelEmitHtml(pGraph, pFile); break;
+    }
+
+    /* fclose flushes buffered bytes; a failure here is a real write error
+       (e.g. disk full) that the per-writer S_OK would otherwise hide. */
+    if (fclose(pFile) != 0 && SUCCEEDED(hr))
+        hr = HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
+
+    if (SUCCEEDED(hr)) {
+        wprintf(L"  [+] Report written — %lu nodes, %lu edges\n",
+            pGraph->cNodes, pGraph->cEdges);
+        if (eFormat == KESTREL_REPORT_HTML)
+            wprintf(L"  [+] Open in any browser to view the graph\n");
+    }
+    else {
+        wprintf(L"  [!] Report generation failed (hr=0x%08lX)\n", (DWORD)hr);
+    }
+    return hr;
+}
+
+/*
+ * KestrelWriteReportAuto
+ * Convenience wrapper: pick the format from the output file extension.
+ * Lets `--report graph.json` / `--report graph.yaml` just work.
+ */
+_Must_inspect_result_
+HRESULT
+KestrelWriteReportAuto(
+    _In_   const KESTREL_GRAPH* pGraph,
+    _In_z_ LPCWSTR              pwszOutputPath)
+{
+    if (!pwszOutputPath) return E_INVALIDARG;
+    return KestrelWriteReport(pGraph, pwszOutputPath,
+        KestrelGuessFormat(pwszOutputPath));
+}
+
+/*
+ * KestrelWriteHTMLReport
+ * Backward-compatible thin wrapper kept so existing call sites (main.c)
+ * keep working unchanged.
+ */
+_Must_inspect_result_
+HRESULT
+KestrelWriteHTMLReport(
+    _In_   const KESTREL_GRAPH* pGraph,
+    _In_z_ LPCWSTR              pwszOutputPath)
+{
+    return KestrelWriteReport(pGraph, pwszOutputPath, KESTREL_REPORT_HTML);
 }

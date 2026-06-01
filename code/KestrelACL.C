@@ -678,16 +678,16 @@ KestrelScanACLEdges(
     _Outptr_ KESTREL_ACL_SCAN_RESULT** ppResult)
 {
     HRESULT                  hr = S_OK;
-    KESTREL_EXTENDED_RIGHT* pRights = NULL;
-    KESTREL_ACL_SCAN_RESULT* pResult = NULL;
-    IDirectorySearch* pSearch = NULL;
-    ADS_SEARCH_HANDLE        hSearch = NULL;
+    KESTREL_EXTENDED_RIGHT* pRights = 0;
+    KESTREL_ACL_SCAN_RESULT* pResult = 0;
+    IDirectorySearch* pSearch = 0;
+    ADS_SEARCH_HANDLE        hSearch = 0;
     WCHAR                    wszPath[512];
     WCHAR                    wszConfigNC[512];
     BOOL                     bUsePlanB = FALSE;
 
     if (!pwszDomainNC || !ppResult) return E_INVALIDARG;
-    *ppResult = NULL;
+    *ppResult = 0;
 
     /* ── 1. Allocate result container ────────────────────────────────── */
     pResult = (KESTREL_ACL_SCAN_RESULT*)HeapAlloc(GetProcessHeap(),
@@ -1004,5 +1004,803 @@ KestrelFreeACLScanResult(
     if (!pResult) return;
     if (pResult->rgEdges)
         HeapFree(GetProcessHeap(), 0, pResult->rgEdges);
+    HeapFree(GetProcessHeap(), 0, pResult);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════
+ * PART C — Kerberos delegation surface (unconstrained / constrained / RBCD)
+ *
+ * Passive, attribute/DACL-derived, DC-only, ordinary domain-user rights —
+ * the same invariant as the ACL scan. This enumerates the delegation
+ * *surface*; nothing here requests tickets or exercises S4U2Self/S4U2Proxy.
+ *
+ * One LDAP search with a server-side filter that returns only objects that
+ * carry a delegation property:
+ *   - userAccountControl bits via LDAP_MATCHING_RULE_BIT_AND
+ *     (1.2.840.113556.1.4.803): 0x80000 unconstrained, 0x1000000 protocol
+ *     transition;
+ *   - presence of msDS-AllowedToDelegateTo (constrained, Kerberos-only);
+ *   - presence of msDS-AllowedToActOnBehalfOfOtherIdentity (RBCD).
+ * Classification and RBCD-SD parsing are done per row.
+ *
+ * NOTE on detectability: the bitwise matching-rule filter and the SD reads
+ * below are themselves distinctive query patterns. This is low-touch, not
+ * stealthy — consistent with the tool's defensive/audit positioning.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/* userAccountControl flags relevant to delegation */
+#define KESTREL_UAC_TRUSTED_FOR_DELEGATION         0x00080000UL /* unconstrained        */
+#define KESTREL_UAC_TRUSTED_TO_AUTH_FOR_DELEGATION 0x01000000UL /* protocol transition  */
+
+/* Server-side filter: any object with a delegation property set. */
+#define KESTREL_DELEG_FILTER \
+    L"(|(userAccountControl:1.2.840.113556.1.4.803:=524288)"    \
+    L"(userAccountControl:1.2.840.113556.1.4.803:=16777216)"    \
+    L"(msDS-AllowedToDelegateTo=*)"                              \
+    L"(msDS-AllowedToActOnBehalfOfOtherIdentity=*))"
+
+static LPWSTR g_rgszDelegAttrs[] = {
+    L"distinguishedName",
+    L"sAMAccountName",
+    L"objectClass",
+    L"userAccountControl",
+    L"msDS-AllowedToDelegateTo",
+    L"msDS-AllowedToActOnBehalfOfOtherIdentity"
+};
+#define KESTREL_DELEG_ATTR_COUNT \
+    (sizeof(g_rgszDelegAttrs) / sizeof(g_rgszDelegAttrs[0]))
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  PART C/D internal helpers                                                  */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+/*
+ * Decode a single ACE into (mask, trustee SID, object type, deny) for the
+ * ACE types Kestrel cares about. Returns FALSE for ACE types we do not
+ * classify (SYSTEM_AUDIT_*, etc.). The returned PSID / GUID* point into the
+ * ACE itself — valid only while the parent ACL (and its SD) stays alive.
+ *
+ * Mirrors the switch inside KestrelWalkDacl, kept as a separate helper so the
+ * new collectors do not edit the already-tested Phase-3 code.
+ */
+static BOOL
+KestrelAceDecode(
+    _In_     LPVOID  pAce,
+    _Out_    DWORD  *pdwMask,
+    _Outptr_ PSID   *ppTrusteeSid,
+    _Outptr_result_maybenull_ GUID **ppObjectType,
+    _Out_    BOOL   *pbDeny)
+{
+    ACE_HEADER *pHeader = (ACE_HEADER *)pAce;
+
+    *pdwMask      = 0;
+    *ppTrusteeSid = NULL;
+    *ppObjectType = NULL;
+    *pbDeny       = FALSE;
+
+    switch (pHeader->AceType) {
+    case ACCESS_ALLOWED_ACE_TYPE:
+    case ACCESS_DENIED_ACE_TYPE: {
+        ACCESS_ALLOWED_ACE *p = (ACCESS_ALLOWED_ACE *)pAce;
+        *pdwMask      = p->Mask;
+        *ppTrusteeSid = (PSID)&p->SidStart;
+        *pbDeny       = (pHeader->AceType == ACCESS_DENIED_ACE_TYPE);
+        return TRUE;
+    }
+    case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+    case ACCESS_DENIED_OBJECT_ACE_TYPE: {
+        ACCESS_ALLOWED_OBJECT_ACE *p = (ACCESS_ALLOWED_OBJECT_ACE *)pAce;
+        *pdwMask = p->Mask;
+        if (p->Flags & ACE_OBJECT_TYPE_PRESENT)
+            *ppObjectType = &p->ObjectType;
+        /* SidStart offset depends on which of the two optional GUIDs are present */
+        *ppTrusteeSid = (PSID)((BYTE *)p + sizeof(ACCESS_ALLOWED_OBJECT_ACE) -
+            sizeof(GUID) *
+            (2 - !!(p->Flags & ACE_OBJECT_TYPE_PRESENT)
+               - !!(p->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT)));
+        *pbDeny = (pHeader->AceType == ACCESS_DENIED_OBJECT_ACE_TYPE);
+        return TRUE;
+    }
+    default:
+        return FALSE;
+    }
+}
+
+_Must_inspect_result_
+static HRESULT
+KestrelDelegResultAppend(
+    _Inout_     KESTREL_DELEG_SCAN_RESULT *pResult,
+    _In_  const KESTREL_DELEG_FINDING     *pFinding)
+{
+    if (pResult->cFindings == pResult->cCapacity) {
+        DWORD cNew = pResult->cCapacity ? pResult->cCapacity * 2 : 256;
+        KESTREL_DELEG_FINDING *pNew = (KESTREL_DELEG_FINDING *)HeapReAlloc(
+            GetProcessHeap(), HEAP_ZERO_MEMORY,
+            pResult->rgFindings, cNew * sizeof(KESTREL_DELEG_FINDING));
+        if (!pNew) return E_OUTOFMEMORY;
+        pResult->rgFindings = pNew;
+        pResult->cCapacity  = cNew;
+    }
+    pResult->rgFindings[pResult->cFindings++] = *pFinding;
+    return S_OK;
+}
+
+/*
+ * Walk the DACL inside an RBCD security descriptor
+ * (msDS-AllowedToActOnBehalfOfOtherIdentity) and emit one RBCD finding per
+ * allowed trustee. The principals in this DACL are exactly those permitted
+ * to impersonate to the owning computer.
+ */
+_Must_inspect_result_
+static HRESULT
+KestrelEmitRbcdFromSd(
+    _In_     PSECURITY_DESCRIPTOR       pSD,
+    _In_z_   LPCWSTR                    pwszDN,
+    _In_z_   LPCWSTR                    pwszSam,
+    _In_z_   LPCWSTR                    pwszClass,
+    _Inout_  KESTREL_DELEG_SCAN_RESULT *pResult)
+{
+    PACL pDacl = NULL;
+    BOOL bPresent = FALSE, bDefault = FALSE;
+
+    if (!IsValidSecurityDescriptor(pSD))                                 return S_OK;
+    if (!GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDefault))   return S_OK;
+    if (!bPresent || !pDacl)                                             return S_OK;
+
+    ACL_SIZE_INFORMATION aclInfo = { 0 };
+    if (!GetAclInformation(pDacl, &aclInfo, sizeof(aclInfo), AclSizeInformation))
+        return S_OK;
+
+    for (DWORD i = 0; i < aclInfo.AceCount; i++) {
+        LPVOID pAce = NULL;
+        if (!GetAce(pDacl, i, &pAce)) continue;
+
+        DWORD  dwMask   = 0;
+        PSID   pSid     = NULL;
+        GUID  *pObjType = NULL;
+        BOOL   bDeny    = FALSE;
+
+        if (!KestrelAceDecode(pAce, &dwMask, &pSid, &pObjType, &bDeny)) continue;
+        if (bDeny || !pSid) continue;   /* RBCD is expressed as allow ACEs */
+
+        KESTREL_DELEG_FINDING f = { 0 };
+        f.Kind = DELEG_RBCD;
+        StringCchCopyW(f.wszDN,          ARRAYSIZE(f.wszDN),          pwszDN);
+        StringCchCopyW(f.wszSam,         ARRAYSIZE(f.wszSam),         pwszSam);
+        StringCchCopyW(f.wszObjectClass, ARRAYSIZE(f.wszObjectClass), pwszClass);
+
+        LPWSTR pwszSidStr = NULL;
+        if (ConvertSidToStringSidW(pSid, &pwszSidStr) && pwszSidStr) {
+            StringCchCopyW(f.wszDetail, ARRAYSIZE(f.wszDetail), pwszSidStr);
+            LocalFree(pwszSidStr);
+        } else {
+            StringCchCopyW(f.wszDetail, ARRAYSIZE(f.wszDetail), L"(invalid SID)");
+        }
+
+        HRESULT hr = KestrelDelegResultAppend(pResult, &f);
+        if (FAILED(hr)) return hr;
+    }
+    return S_OK;
+}
+
+/*
+ * KestrelScanDelegation — PART C implementation.
+ */
+_Must_inspect_result_
+HRESULT
+KestrelScanDelegation(
+    _In_z_   LPCWSTR                     pwszDomainNC,
+    _Outptr_ KESTREL_DELEG_SCAN_RESULT **ppResult)
+{
+    HRESULT                    hr      = S_OK;
+    IDirectorySearch          *pSearch = NULL;
+    ADS_SEARCH_HANDLE          hSearch = NULL;
+    KESTREL_DELEG_SCAN_RESULT *pResult = NULL;
+    WCHAR                      wszPath[512];
+
+    if (!pwszDomainNC || !ppResult) return E_INVALIDARG;
+    *ppResult = NULL;
+
+    pResult = (KESTREL_DELEG_SCAN_RESULT *)HeapAlloc(GetProcessHeap(),
+        HEAP_ZERO_MEMORY, sizeof(*pResult));
+    if (!pResult) return E_OUTOFMEMORY;
+
+    hr = StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszDomainNC);
+    if (FAILED(hr)) goto Cleanup;
+
+    hr = ADsGetObject(wszPath, &IID_IDirectorySearch, (void **)&pSearch);
+    if (FAILED(hr)) {
+        wprintf(L"  [!] KestrelScanDelegation: ADsGetObject failed 0x%08X\n", hr);
+        goto Cleanup;
+    }
+
+    ADS_SEARCHPREF_INFO prefs[2];
+    prefs[0].dwSearchPref  = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_SUBTREE;
+    prefs[1].dwSearchPref  = ADS_SEARCHPREF_PAGESIZE;
+    prefs[1].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[1].vValue.Integer = KESTREL_LDAP_PAGESIZE;
+
+    hr = pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 2);
+    if (FAILED(hr)) goto Cleanup;
+
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+        KESTREL_DELEG_FILTER,
+        (LPWSTR *)g_rgszDelegAttrs, KESTREL_DELEG_ATTR_COUNT,
+        &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    wprintf(L"  [*] Scanning Kerberos delegation surface...\n\n");
+    wprintf(L"  %-52s %-22s %-26s %s\n",
+        L"Object", L"sAMAccountName", L"Kind", L"Detail");
+    wprintf(L"  %s\n",
+        L"--------------------------------------------------------------------------------"
+        L"--------------------------------------------------");
+
+    while (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+
+        ADS_SEARCH_COLUMN colDN    = { 0 };
+        ADS_SEARCH_COLUMN colSam   = { 0 };
+        ADS_SEARCH_COLUMN colClass = { 0 };
+        ADS_SEARCH_COLUMN colUac   = { 0 };
+        ADS_SEARCH_COLUMN colA2D   = { 0 };  /* msDS-AllowedToDelegateTo            */
+        ADS_SEARCH_COLUMN colRbcd  = { 0 };  /* msDS-AllowedToActOnBehalfOfOtherId. */
+
+        WCHAR wszDN[512]   = { 0 };
+        WCHAR wszSam[64]   = L"-";
+        WCHAR wszClass[64] = L"unknown";
+        DWORD dwUac        = 0;
+
+        BOOL bGotDN   = FALSE, bGotSam = FALSE, bGotClass = FALSE;
+        BOOL bGotUac  = FALSE, bGotA2D = FALSE, bGotRbcd  = FALSE;
+
+        /* distinguishedName (mandatory) */
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"distinguishedName", &colDN)) &&
+            colDN.dwNumValues > 0 &&
+            colDN.pADsValues[0].dwType == ADSTYPE_DN_STRING) {
+            StringCchCopyW(wszDN, ARRAYSIZE(wszDN), colDN.pADsValues[0].DNString);
+            bGotDN = TRUE;
+            pSearch->lpVtbl->FreeColumn(pSearch, &colDN);
+        }
+        if (!bGotDN) { pResult->cObjectsErrored++; continue; }
+
+        /* sAMAccountName */
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"sAMAccountName", &colSam)) &&
+            colSam.dwNumValues > 0 &&
+            colSam.pADsValues[0].dwType == ADSTYPE_CASE_IGNORE_STRING) {
+            StringCchCopyW(wszSam, ARRAYSIZE(wszSam),
+                colSam.pADsValues[0].CaseIgnoreString);
+            bGotSam = TRUE;
+        }
+        if (bGotSam) pSearch->lpVtbl->FreeColumn(pSearch, &colSam);
+
+        /* objectClass — take most specific (last) */
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"objectClass", &colClass)) &&
+            colClass.dwNumValues > 0) {
+            DWORD iLast = colClass.dwNumValues - 1;
+            if (colClass.pADsValues[iLast].dwType == ADSTYPE_CASE_IGNORE_STRING)
+                StringCchCopyW(wszClass, ARRAYSIZE(wszClass),
+                    colClass.pADsValues[iLast].CaseIgnoreString);
+            bGotClass = TRUE;
+            pSearch->lpVtbl->FreeColumn(pSearch, &colClass);
+        }
+
+        /* userAccountControl */
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"userAccountControl", &colUac)) &&
+            colUac.dwNumValues > 0 &&
+            colUac.pADsValues[0].dwType == ADSTYPE_INTEGER) {
+            dwUac = (DWORD)colUac.pADsValues[0].Integer;
+            bGotUac = TRUE;
+        }
+        if (bGotUac) pSearch->lpVtbl->FreeColumn(pSearch, &colUac);
+
+        /* ── Classify ───────────────────────────────────────────────── */
+
+        /* 1) Unconstrained — TGT forwarded to any service this host runs */
+        if (dwUac & KESTREL_UAC_TRUSTED_FOR_DELEGATION) {
+            KESTREL_DELEG_FINDING f = { 0 };
+            f.Kind = DELEG_UNCONSTRAINED;
+            StringCchCopyW(f.wszDN,          ARRAYSIZE(f.wszDN),          wszDN);
+            StringCchCopyW(f.wszSam,         ARRAYSIZE(f.wszSam),         wszSam);
+            StringCchCopyW(f.wszObjectClass, ARRAYSIZE(f.wszObjectClass), wszClass);
+            StringCchCopyW(f.wszDetail,      ARRAYSIZE(f.wszDetail),
+                L"(forwards TGT to any service)");
+            hr = KestrelDelegResultAppend(pResult, &f);
+            if (FAILED(hr)) goto RowCleanup;
+        }
+
+        /* 2) Constrained — one finding per target SPN; protocol transition
+              (S4U2Self) distinguished by the TRUSTED_TO_AUTH bit. */
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"msDS-AllowedToDelegateTo", &colA2D)) &&
+            colA2D.dwNumValues > 0) {
+            bGotA2D = TRUE;
+            BOOL bProtoTrans = !!(dwUac & KESTREL_UAC_TRUSTED_TO_AUTH_FOR_DELEGATION);
+
+            for (DWORD i = 0; i < colA2D.dwNumValues; i++) {
+                if (colA2D.pADsValues[i].dwType != ADSTYPE_CASE_IGNORE_STRING)
+                    continue;
+
+                KESTREL_DELEG_FINDING f = { 0 };
+                f.Kind = bProtoTrans ? DELEG_CONSTRAINED_PROTOTRANS
+                                     : DELEG_CONSTRAINED;
+                StringCchCopyW(f.wszDN,          ARRAYSIZE(f.wszDN),          wszDN);
+                StringCchCopyW(f.wszSam,         ARRAYSIZE(f.wszSam),         wszSam);
+                StringCchCopyW(f.wszObjectClass, ARRAYSIZE(f.wszObjectClass), wszClass);
+                StringCchCopyW(f.wszDetail,      ARRAYSIZE(f.wszDetail),
+                    colA2D.pADsValues[i].CaseIgnoreString);
+
+                hr = KestrelDelegResultAppend(pResult, &f);
+                if (FAILED(hr)) { pSearch->lpVtbl->FreeColumn(pSearch, &colA2D);
+                                  goto RowCleanup; }
+            }
+        }
+        if (bGotA2D) pSearch->lpVtbl->FreeColumn(pSearch, &colA2D);
+
+        /* 3) RBCD — parse the SD blob, one finding per allowed principal */
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"msDS-AllowedToActOnBehalfOfOtherIdentity", &colRbcd)) &&
+            colRbcd.dwNumValues > 0 &&
+            colRbcd.pADsValues[0].dwType == ADSTYPE_PROV_SPECIFIC &&
+            colRbcd.pADsValues[0].ProviderSpecific.lpValue) {
+            bGotRbcd = TRUE;
+            PSECURITY_DESCRIPTOR pSD = (PSECURITY_DESCRIPTOR)
+                colRbcd.pADsValues[0].ProviderSpecific.lpValue;
+            hr = KestrelEmitRbcdFromSd(pSD, wszDN, wszSam, wszClass, pResult);
+            if (FAILED(hr)) { pSearch->lpVtbl->FreeColumn(pSearch, &colRbcd);
+                              goto RowCleanup; }
+        }
+        if (bGotRbcd) pSearch->lpVtbl->FreeColumn(pSearch, &colRbcd);
+
+        pResult->cObjectsScanned++;
+        continue;
+
+    RowCleanup:
+        /* hr already set to a failure; columns for this row freed above as
+           reached. Bail out of the loop on hard allocation failure. */
+        goto Cleanup;
+    }
+
+    /* ── Print findings ───────────────────────────────────────────────── */
+    {
+        static const LPCWSTR rgszKind[] = {
+            L"Unconstrained",
+            L"Constrained (Kerberos)",
+            L"Constrained + S4U2Self",
+            L"RBCD (allowed principal)"
+        };
+        for (DWORD i = 0; i < pResult->cFindings; i++) {
+            KESTREL_DELEG_FINDING *pF = &pResult->rgFindings[i];
+            LPCWSTR pwszKind = (pF->Kind < ARRAYSIZE(rgszKind))
+                ? rgszKind[pF->Kind] : L"?";
+            wprintf(L"  %-52s %-22s %-26s %s\n",
+                pF->wszDN, pF->wszSam, pwszKind, pF->wszDetail);
+        }
+    }
+
+    wprintf(L"\n  [*] Objects with delegation set: %lu  |  Findings: %lu  |  Errors: %lu\n",
+        pResult->cObjectsScanned, pResult->cFindings, pResult->cObjectsErrored);
+
+    *ppResult = pResult;
+    pResult   = NULL;
+
+Cleanup:
+    if (hSearch && pSearch)
+        pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)
+        pSearch->lpVtbl->Release(pSearch);
+    if (pResult) KestrelFreeDelegScanResult(pResult);
+    return hr;
+}
+
+VOID
+KestrelFreeDelegScanResult(
+    _In_opt_ _Post_ptr_invalid_ KESTREL_DELEG_SCAN_RESULT *pResult)
+{
+    if (!pResult) return;
+    if (pResult->rgFindings)
+        HeapFree(GetProcessHeap(), 0, pResult->rgFindings);
+    HeapFree(GetProcessHeap(), 0, pResult);
+}
+
+
+/* ═════════════════════════════════════════════════════════════════════════
+ * PART D — LAPS readability (who can read the local-admin password)
+ *
+ * Passive, DC-only, ordinary domain-user rights. We answer the audit
+ * question "which principals are permitted to read the LAPS attribute" — we
+ * never read the secret itself (it is ACL-protected and confidential).
+ *
+ * Method:
+ *   1. Resolve the schemaIDGUID of the LAPS attributes from CN=Schema. Their
+ *      presence also tells us which LAPS generation is deployed:
+ *        legacy  : ms-Mcs-AdmPwd
+ *        Windows : msLAPS-Password, msLAPS-EncryptedPassword
+ *   2. Enumerate computer objects with DACL_SECURITY_INFORMATION and, for
+ *      each, find ACEs that grant a read of the LAPS attribute:
+ *        - an object ACE whose ObjectType == a LAPS schemaIDGUID with
+ *          ReadProperty or Control-Access (confidential attrs need CR too); or
+ *        - an all-properties ACE (no ObjectType) with ReadProperty/GenericRead; or
+ *        - GenericAll.
+ *
+ * Domain Admins / SYSTEM reading LAPS is expected by design; the audit signal
+ * is *delegated* or unexpected readers. SYSTEM (S-1-5-18) is filtered out as
+ * pure noise; everything else is reported.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+#define KESTREL_LAPS_MAX_ATTRS 3
+
+static LPWSTR g_rgszLapsObjAttrs[] = {
+    L"distinguishedName",
+    L"nTSecurityDescriptor"
+};
+#define KESTREL_LAPS_OBJ_ATTR_COUNT \
+    (sizeof(g_rgszLapsObjAttrs) / sizeof(g_rgszLapsObjAttrs[0]))
+
+typedef struct _KESTREL_LAPS_ATTR {
+    GUID    guid;
+    WCHAR   wszName[64];
+    BOOL    bValid;
+} KESTREL_LAPS_ATTR;
+
+/*
+ * Resolve schemaIDGUID for one attribute lDAPDisplayName under CN=Schema.
+ * schemaIDGUID is the raw 16-byte GUID in the same layout as a GUID struct,
+ * so it is memcpy-comparable against an ACE ObjectType. Sets *pbFound=FALSE
+ * (and returns S_OK) when the attribute is not in the schema.
+ */
+_Must_inspect_result_
+static HRESULT
+KestrelResolveSchemaGuid(
+    _In_z_ LPCWSTR pwszSchemaNC,
+    _In_z_ LPCWSTR pwszLdapName,
+    _Out_  GUID   *pGuid,
+    _Out_  BOOL   *pbFound)
+{
+    HRESULT           hr      = S_OK;
+    IDirectorySearch *pSearch = NULL;
+    ADS_SEARCH_HANDLE hSearch = NULL;
+    WCHAR             wszPath[600];
+    WCHAR             wszFilter[256];
+    LPWSTR            attrs[] = { L"schemaIDGUID" };
+
+    ZeroMemory(pGuid, sizeof(*pGuid));
+    *pbFound = FALSE;
+
+    hr = StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszSchemaNC);
+    if (FAILED(hr)) return hr;
+
+    hr = ADsGetObject(wszPath, &IID_IDirectorySearch, (void **)&pSearch);
+    if (FAILED(hr)) return hr;
+
+    ADS_SEARCHPREF_INFO prefs[2];
+    prefs[0].dwSearchPref  = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_ONELEVEL;
+    prefs[1].dwSearchPref  = ADS_SEARCHPREF_PAGESIZE;
+    prefs[1].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[1].vValue.Integer = 50;
+
+    hr = pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 2);
+    if (FAILED(hr)) goto Cleanup;
+
+    hr = StringCchPrintfW(wszFilter, ARRAYSIZE(wszFilter),
+        L"(lDAPDisplayName=%s)", pwszLdapName);
+    if (FAILED(hr)) goto Cleanup;
+
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch, wszFilter, attrs, 1, &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    if (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+        ADS_SEARCH_COLUMN col = { 0 };
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"schemaIDGUID", &col)) &&
+            col.dwNumValues > 0 &&
+            col.pADsValues[0].dwType == ADSTYPE_OCTET_STRING &&
+            col.pADsValues[0].OctetString.lpValue &&
+            col.pADsValues[0].OctetString.dwLength >= sizeof(GUID)) {
+            CopyMemory(pGuid, col.pADsValues[0].OctetString.lpValue, sizeof(GUID));
+            *pbFound = TRUE;
+            pSearch->lpVtbl->FreeColumn(pSearch, &col);
+        }
+    }
+
+Cleanup:
+    if (hSearch && pSearch)
+        pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)
+        pSearch->lpVtbl->Release(pSearch);
+    return hr;
+}
+
+_Must_inspect_result_
+static HRESULT
+KestrelLapsResultAppend(
+    _Inout_     KESTREL_LAPS_SCAN_RESULT *pResult,
+    _In_  const KESTREL_LAPS_READER      *pReader)
+{
+    if (pResult->cReaders == pResult->cCapacity) {
+        DWORD cNew = pResult->cCapacity ? pResult->cCapacity * 2 : 256;
+        KESTREL_LAPS_READER *pNew = (KESTREL_LAPS_READER *)HeapReAlloc(
+            GetProcessHeap(), HEAP_ZERO_MEMORY,
+            pResult->rgReaders, cNew * sizeof(KESTREL_LAPS_READER));
+        if (!pNew) return E_OUTOFMEMORY;
+        pResult->rgReaders  = pNew;
+        pResult->cCapacity  = cNew;
+    }
+    pResult->rgReaders[pResult->cReaders++] = *pReader;
+    return S_OK;
+}
+
+/*
+ * Walk one computer's DACL and emit LAPS-reader findings.
+ */
+_Must_inspect_result_
+static HRESULT
+KestrelEmitLapsReadersFromSd(
+    _In_      PSECURITY_DESCRIPTOR        pSD,
+    _In_z_    LPCWSTR                     pwszComputerDN,
+    _In_reads_(cAttrs) const KESTREL_LAPS_ATTR *rgAttrs,
+    _In_      DWORD                       cAttrs,
+    _Inout_   KESTREL_LAPS_SCAN_RESULT   *pResult)
+{
+    PACL pDacl = NULL;
+    BOOL bPresent = FALSE, bDefault = FALSE;
+
+    if (!IsValidSecurityDescriptor(pSD))                               return S_OK;
+    if (!GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDefault)) return S_OK;
+    if (!bPresent || !pDacl)                                           return S_OK;
+
+    ACL_SIZE_INFORMATION aclInfo = { 0 };
+    if (!GetAclInformation(pDacl, &aclInfo, sizeof(aclInfo), AclSizeInformation))
+        return S_OK;
+
+    for (DWORD i = 0; i < aclInfo.AceCount; i++) {
+        LPVOID pAce = NULL;
+        if (!GetAce(pDacl, i, &pAce)) continue;
+
+        DWORD  dwMask   = 0;
+        PSID   pSid     = NULL;
+        GUID  *pObjType = NULL;
+        BOOL   bDeny    = FALSE;
+
+        if (!KestrelAceDecode(pAce, &dwMask, &pSid, &pObjType, &bDeny)) continue;
+        if (bDeny || !pSid) continue;
+
+        BOOL    bGrants    = FALSE;
+        BOOL    bAllProps  = FALSE;
+        LPCWSTR pwszAttr   = L"(LAPS)";
+
+        if (dwMask & GENERIC_ALL) {
+            bGrants = TRUE; bAllProps = TRUE; pwszAttr = L"(GenericAll)";
+        }
+        else if (pObjType) {
+            /* Object ACE on a specific attribute: must match a LAPS GUID and
+               grant ReadProperty or Control-Access (confidential read). */
+            if (dwMask & (ADS_RIGHT_DS_READ_PROP | ADS_RIGHT_DS_CONTROL_ACCESS)) {
+                for (DWORD a = 0; a < cAttrs; a++) {
+                    if (rgAttrs[a].bValid &&
+                        IsEqualGUID(pObjType, &rgAttrs[a].guid)) {
+                        bGrants  = TRUE;
+                        pwszAttr = rgAttrs[a].wszName;
+                        break;
+                    }
+                }
+            }
+        }
+        else {
+            /* All-properties ACE (no ObjectType): reads every attribute,
+               LAPS included. */
+            if (dwMask & (ADS_RIGHT_DS_READ_PROP | ADS_RIGHT_GENERIC_READ)) {
+                bGrants = TRUE; bAllProps = TRUE; pwszAttr = L"(all properties)";
+            }
+        }
+
+        if (!bGrants) continue;
+
+        LPWSTR pwszSidStr = NULL;
+        if (!ConvertSidToStringSidW(pSid, &pwszSidStr) || !pwszSidStr)
+            continue;
+
+        /* Filter SYSTEM as pure noise; keep DA/EA visible for completeness. */
+        if (_wcsicmp(pwszSidStr, L"S-1-5-18") == 0) { LocalFree(pwszSidStr); continue; }
+
+        KESTREL_LAPS_READER r = { 0 };
+        StringCchCopyW(r.wszComputerDN, ARRAYSIZE(r.wszComputerDN), pwszComputerDN);
+        StringCchCopyW(r.wszTrusteeSid, ARRAYSIZE(r.wszTrusteeSid), pwszSidStr);
+        StringCchCopyW(r.wszAttr,       ARRAYSIZE(r.wszAttr),       pwszAttr);
+        r.bAllProperties = bAllProps;
+        LocalFree(pwszSidStr);
+
+        HRESULT hr = KestrelLapsResultAppend(pResult, &r);
+        if (FAILED(hr)) return hr;
+    }
+    return S_OK;
+}
+
+/*
+ * KestrelScanLapsReaders — PART D implementation.
+ */
+_Must_inspect_result_
+HRESULT
+KestrelScanLapsReaders(
+    _In_z_   LPCWSTR                    pwszDomainNC,
+    _In_z_   LPCWSTR                    pwszConfigNC,
+    _Outptr_ KESTREL_LAPS_SCAN_RESULT **ppResult)
+{
+    HRESULT                   hr      = S_OK;
+    IDirectorySearch         *pSearch = NULL;
+    ADS_SEARCH_HANDLE         hSearch = NULL;
+    KESTREL_LAPS_SCAN_RESULT *pResult = NULL;
+    WCHAR                     wszConfigNC[512];
+    WCHAR                     wszSchemaNC[600];
+    WCHAR                     wszPath[512];
+
+    KESTREL_LAPS_ATTR rgAttrs[KESTREL_LAPS_MAX_ATTRS] = { 0 };
+    DWORD             cAttrs = 0;
+
+    if (!pwszDomainNC || !ppResult) return E_INVALIDARG;
+    *ppResult = NULL;
+
+    pResult = (KESTREL_LAPS_SCAN_RESULT *)HeapAlloc(GetProcessHeap(),
+        HEAP_ZERO_MEMORY, sizeof(*pResult));
+    if (!pResult) return E_OUTOFMEMORY;
+
+    /* ── 1. Resolve configNC → schemaNC ───────────────────────────────── */
+    if (pwszConfigNC && *pwszConfigNC != L'\0') {
+        StringCchCopyW(wszConfigNC, ARRAYSIZE(wszConfigNC), pwszConfigNC);
+    } else {
+        hr = KestrelGetConfigNC(wszConfigNC, ARRAYSIZE(wszConfigNC));
+        if (FAILED(hr)) {
+            wprintf(L"  [!] Failed to resolve configNC: 0x%08X\n", hr);
+            goto Cleanup;
+        }
+    }
+    hr = StringCchPrintfW(wszSchemaNC, ARRAYSIZE(wszSchemaNC),
+        L"CN=Schema,%s", wszConfigNC);
+    if (FAILED(hr)) goto Cleanup;
+
+    /* ── 2. Resolve LAPS attribute GUIDs / presence ───────────────────── */
+    {
+        static const LPCWSTR rgszLapsNames[] = {
+            L"ms-Mcs-AdmPwd",          /* legacy LAPS  */
+            L"msLAPS-Password",        /* Windows LAPS */
+            L"msLAPS-EncryptedPassword"
+        };
+        for (DWORD i = 0; i < ARRAYSIZE(rgszLapsNames) && cAttrs < KESTREL_LAPS_MAX_ATTRS; i++) {
+            GUID  g = { 0 };
+            BOOL  bFound = FALSE;
+            HRESULT hrG = KestrelResolveSchemaGuid(wszSchemaNC, rgszLapsNames[i],
+                                                   &g, &bFound);
+            if (FAILED(hrG)) continue;          /* tolerate per-attr failure */
+            if (!bFound) continue;
+
+            rgAttrs[cAttrs].guid   = g;
+            rgAttrs[cAttrs].bValid = TRUE;
+            StringCchCopyW(rgAttrs[cAttrs].wszName,
+                ARRAYSIZE(rgAttrs[cAttrs].wszName), rgszLapsNames[i]);
+            cAttrs++;
+
+            if (i == 0) pResult->bLegacyLapsPresent  = TRUE;
+            else        pResult->bWindowsLapsPresent = TRUE;
+        }
+    }
+
+    wprintf(L"  [*] LAPS schema: legacy(ms-Mcs-AdmPwd)=%s  windows(msLAPS-*)=%s\n",
+        pResult->bLegacyLapsPresent  ? L"yes" : L"no",
+        pResult->bWindowsLapsPresent ? L"yes" : L"no");
+
+    if (cAttrs == 0) {
+        wprintf(L"  [*] No LAPS attributes present in schema — nothing to enumerate.\n");
+        *ppResult = pResult;
+        pResult   = NULL;
+        goto Cleanup;   /* S_OK with an empty, informative result */
+    }
+
+    /* ── 3. Enumerate computers, read DACL ─────────────────────────────── */
+    hr = StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszDomainNC);
+    if (FAILED(hr)) goto Cleanup;
+
+    hr = ADsGetObject(wszPath, &IID_IDirectorySearch, (void **)&pSearch);
+    if (FAILED(hr)) {
+        wprintf(L"  [!] KestrelScanLapsReaders: ADsGetObject failed 0x%08X\n", hr);
+        goto Cleanup;
+    }
+
+    ADS_SEARCHPREF_INFO prefs[3];
+    prefs[0].dwSearchPref  = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_SUBTREE;
+    prefs[1].dwSearchPref  = ADS_SEARCHPREF_PAGESIZE;
+    prefs[1].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[1].vValue.Integer = KESTREL_LDAP_PAGESIZE;
+    prefs[2].dwSearchPref  = ADS_SEARCHPREF_SECURITY_MASK;
+    prefs[2].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[2].vValue.Integer = 0x4;   /* DACL_SECURITY_INFORMATION — domain-user readable */
+
+    hr = pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 3);
+    if (FAILED(hr)) goto Cleanup;
+
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+        L"(objectClass=computer)",
+        (LPWSTR *)g_rgszLapsObjAttrs, KESTREL_LAPS_OBJ_ATTR_COUNT,
+        &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    wprintf(L"  [*] Enumerating LAPS readers on computer objects...\n\n");
+    wprintf(L"  %-56s %-26s %s\n", L"Computer", L"Reader SID", L"Grants");
+    wprintf(L"  %s\n",
+        L"--------------------------------------------------------------------------------"
+        L"------------------------------");
+
+    while (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+
+        ADS_SEARCH_COLUMN colDN = { 0 };
+        ADS_SEARCH_COLUMN colSD = { 0 };
+        WCHAR wszDN[512] = { 0 };
+        BOOL  bGotDN = FALSE, bGotSD = FALSE;
+
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"distinguishedName", &colDN)) &&
+            colDN.dwNumValues > 0 &&
+            colDN.pADsValues[0].dwType == ADSTYPE_DN_STRING) {
+            StringCchCopyW(wszDN, ARRAYSIZE(wszDN), colDN.pADsValues[0].DNString);
+            bGotDN = TRUE;
+            pSearch->lpVtbl->FreeColumn(pSearch, &colDN);
+        }
+        if (!bGotDN) { pResult->cComputersErrored++; continue; }
+
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"nTSecurityDescriptor", &colSD)) &&
+            colSD.dwNumValues > 0 &&
+            colSD.pADsValues[0].dwType == ADSTYPE_PROV_SPECIFIC &&
+            colSD.pADsValues[0].ProviderSpecific.lpValue) {
+            bGotSD = TRUE;
+            PSECURITY_DESCRIPTOR pSD = (PSECURITY_DESCRIPTOR)
+                colSD.pADsValues[0].ProviderSpecific.lpValue;
+            hr = KestrelEmitLapsReadersFromSd(pSD, wszDN, rgAttrs, cAttrs, pResult);
+            if (FAILED(hr)) { pSearch->lpVtbl->FreeColumn(pSearch, &colSD); goto Cleanup; }
+            pResult->cComputersScanned++;
+        } else {
+            pResult->cComputersErrored++;
+        }
+        if (bGotSD) pSearch->lpVtbl->FreeColumn(pSearch, &colSD);
+    }
+
+    for (DWORD i = 0; i < pResult->cReaders; i++) {
+        KESTREL_LAPS_READER *pR = &pResult->rgReaders[i];
+        wprintf(L"  %-56s %-26s %s\n",
+            pR->wszComputerDN, pR->wszTrusteeSid, pR->wszAttr);
+    }
+
+    wprintf(L"\n  [*] Computers scanned: %lu  |  Reader grants: %lu  |  Errors: %lu\n",
+        pResult->cComputersScanned, pResult->cReaders, pResult->cComputersErrored);
+    wprintf(L"  [*] Note: Domain/Enterprise Admins reading LAPS is by design; "
+            L"the signal is delegated/unexpected principals.\n");
+
+    *ppResult = pResult;
+    pResult   = NULL;
+
+Cleanup:
+    if (hSearch && pSearch)
+        pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)
+        pSearch->lpVtbl->Release(pSearch);
+    if (pResult) KestrelFreeLapsScanResult(pResult);
+    return hr;
+}
+
+VOID
+KestrelFreeLapsScanResult(
+    _In_opt_ _Post_ptr_invalid_ KESTREL_LAPS_SCAN_RESULT *pResult)
+{
+    if (!pResult) return;
+    if (pResult->rgReaders)
+        HeapFree(GetProcessHeap(), 0, pResult->rgReaders);
     HeapFree(GetProcessHeap(), 0, pResult);
 }
