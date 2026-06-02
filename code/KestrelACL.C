@@ -817,7 +817,7 @@ KestrelScanACLEdges(
 
             HRESULT hrA = ADsGetObject(wszObjPath,
                 &IID_IDirectoryObject, (void**)&pDirObj);
-            wprintf(L"[*** ? ***] hrA = 0x%08X", hrA);
+            //wprintf(L"[*** ? ***] hrA = 0x%08X", hrA);
             //if (hrA == E_FAIL || hrA == E_ACCESSDENIED ||
             //    hrA == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED)) 
             

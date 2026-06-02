@@ -53,9 +53,10 @@ KestrelPrintHelp(VOID)
         L"  --laps         LAPS coverage (legacy + Windows LAPS 2023+)\n"
         L"  --stale        Stale computers via lastLogonTimestamp\n"
         L"  --acl          ACL edge extraction via IDirectoryObject\n"
-        L"  --groups       Transitive group membership via LDAP_MATCHING_RULE_IN_CHAIN\n\n"
+        L"  --groups       Transitive group membership via LDAP_MATCHING_RULE_IN_CHAIN\n"
+        L"  --policy       GPO security policy audit (LLMNR/NBT-NS/WDigest/NTLMv1)\n\n"
         L"OUTPUT:\n"
-        L"  --report <path>  Generate HTML report to specified path\n\n"
+        L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n\n"
         L"OPTIONS:\n"
         L"  --verbose / -v   Enable trace output\n"
         L"  --version        Show version and exit\n"
@@ -124,6 +125,7 @@ KestrelParseArgs(
             pCfg->bRunStale = TRUE;
             pCfg->bRunACL = TRUE;
             pCfg->bRunGroups = TRUE;
+            pCfg->bRunPolicy = TRUE;
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -162,6 +164,11 @@ KestrelParseArgs(
             pCfg->bExplicitModules = TRUE;
             continue;
         }
+        if (_wcsicmp(arg, L"--policy") == 0) {
+            pCfg->bRunPolicy = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
 
         /* ── Unknown argument ────────────────────────────────────── */
         wprintf(L"[!] Unknown argument: %s\n", arg);
@@ -178,6 +185,7 @@ KestrelParseArgs(
         pCfg->bRunStale = TRUE;
         pCfg->bRunACL = TRUE;
         pCfg->bRunGroups = TRUE;
+        pCfg->bRunPolicy = TRUE;
     }
 
     return TRUE;
@@ -211,6 +219,9 @@ int wmain(int argc, wchar_t* argv[])
     IADs* pRootDSE = 0;
     KESTREL_ACL_SCAN_RESULT* pACL = 0;
     KESTREL_GROUP_SCAN_RESULT* pGroup = 0;
+    KESTREL_DELEG_SCAN_RESULT* pDeleg = 0;
+    KESTREL_LAPS_SCAN_RESULT*  pLaps  = 0;
+    struct _KESTREL_POLICY_RESULT* pPolicy = 0;
     KESTREL_GRAPH* pGraph = 0;
     VARIANT varDomain, varConfig;
     VariantInit(&varDomain);
@@ -281,22 +292,47 @@ int wmain(int argc, wchar_t* argv[])
         KTRACE(L"v0.3 complete — groups: %lu", pGroup ? pGroup->cGroups : 0);
     }
 
-    /* ── v0.4: build graph + HTML report ─────────────────────────── */
-    if (cfg.bRunACL || cfg.bRunGroups) {
-        hr = KestrelBuildGraph(pACL, pGroup, &pGraph);
+    /* ── v0.4: build graph + report (HTML / JSON / YAML by extension) ── */
+    if (cfg.bRunDelegation) {
+        wprintf(L"\n═══ Kestrel v0.4 — Delegation Surface ═══\n\n");
+        hr = KestrelScanDelegation(wszDomainNC, &pDeleg);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelScanDelegation failed: 0x%08X\n", hr);
+        KTRACE(L"delegation complete — findings: %lu",
+            pDeleg ? pDeleg->cFindings : 0);
+    }
+
+    if (cfg.bRunLAPS) {
+        wprintf(L"\n═══ Kestrel v0.4 — LAPS Readability ═══\n\n");
+        hr = KestrelScanLapsReaders(wszDomainNC, wszConfigNC, &pLaps);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelScanLapsReaders failed: 0x%08X\n", hr);
+        KTRACE(L"LAPS complete — reader grants: %lu",
+            pLaps ? pLaps->cReaders : 0);
+    }
+
+    /* ── v0.5: GPO policy audit (LLMNR / NBT-NS / WDigest / NTLMv1 / LDAP signing) ── */
+    if (cfg.bRunPolicy) {
+        hr = KestrelRunPolicyAudit(wszDomainNC, &pPolicy);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunPolicyAudit failed: 0x%08X\n", hr);
+    }
+
+    if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation || cfg.bRunLAPS) {
+        hr = KestrelBuildGraph(pACL, pGroup, pDeleg, pLaps, &pGraph);
         if (FAILED(hr)) {
             wprintf(L"[!] KestrelBuildGraph failed: 0x%08X\n", hr);
         }
         else if (cfg.wszReportPath[0] != L'\0') {
-            hr = KestrelWriteHTMLReport(pGraph, cfg.wszReportPath);
+            hr = KestrelWriteReportAuto(pGraph, cfg.wszReportPath);
             if (FAILED(hr))
-                wprintf(L"[!] KestrelWriteHTMLReport failed: 0x%08X\n", hr);
+                wprintf(L"[!] KestrelWriteReportAuto failed: 0x%08X\n", hr);
         }
         else {
             wprintf(L"\n[*] Graph: %lu nodes, %lu edges\n",
                 pGraph ? pGraph->cNodes : 0,
                 pGraph ? pGraph->cEdges : 0);
-            wprintf(L"[*] Use --report <path.html> to generate visual report\n");
+            wprintf(L"[*] Use --report <path.html|.json|.yaml> to generate a report\n");
         }
     }
 
@@ -304,6 +340,9 @@ Cleanup:
     KTRACE(L"Cleanup...");
     KestrelFreeACLScanResult(pACL);
     KestrelFreeGroupScanResult(pGroup);
+    KestrelFreeDelegScanResult(pDeleg);
+    KestrelFreeLapsScanResult(pLaps);
+    KestrelFreePolicyResult(pPolicy);
     KestrelFreeGraph(pGraph);
     CoUninitialize();
     return HRESULT_CODE(hr);

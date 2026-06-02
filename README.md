@@ -169,8 +169,8 @@ v0.2 to surface attack paths: `member → [via group] → EdgeType → target`.
 | v0.1    | ✅      | Five passive AD scans                                                                                    |
 | v0.2    | ✅      | ACL edge extraction via IDirectoryObject / nTSecurityDescriptor                                          |
 | v0.3    | ✅      | Transitive group membership via LDAP\_MATCHING\_RULE\_IN\_CHAIN                                          |
-| v0.4    | 🔲     | In-memory graph from ACL + membership + delegation data. Structured export (JSON / YAML).                |
-| v0.5    | 🔲     | BFS shortest-path finder: any principal → Domain Admins. Pure in-memory traversal over v0.4 data — no additional queries, no host contact. |
+| v0.4    | ✅      | In-memory graph from ACL + membership + delegation data. Structured export (JSON / YAML).                |
+| v0.5    | 🔲      | BFS shortest-path finder: any principal → Domain Admins. Pure in-memory traversal over v0.4 data — no additional queries, no host contact. |
 
 Every roadmap item stays inside the boundary in [Scope and non-goals](#scope-and-non-goals).
 Edge types that would require touching member hosts — logged-on sessions, local-admin

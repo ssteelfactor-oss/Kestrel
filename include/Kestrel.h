@@ -60,6 +60,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunStale;
     BOOL bRunACL;
     BOOL bRunGroups;
+    BOOL bRunPolicy;    /* v0.5 GPO policy audit */
     BOOL bRunRPC;       /* v0.5 */
 
     /* Output */
@@ -202,16 +203,18 @@ typedef enum _KESTREL_NODE_CLASS {
 } KESTREL_NODE_CLASS;
 
 typedef enum _KESTREL_GRAPH_EDGE_TYPE {
-    GEDGE_ACL_GENERIC_ALL    = 0,
-    GEDGE_ACL_WRITE_DACL     = 1,
-    GEDGE_ACL_WRITE_OWNER    = 2,
-    GEDGE_ACL_GENERIC_WRITE  = 3,
-    GEDGE_ACL_EXTENDED_RIGHT = 4,
-    GEDGE_ACL_WRITE_PROP     = 5,
-    GEDGE_MEMBER_OF          = 6,
-    GEDGE_DELEGATION_UNCONS  = 7,
-    GEDGE_DELEGATION_CONS    = 8,
-    GEDGE_DELEGATION_S4U2    = 9,
+    GEDGE_ACL_GENERIC_ALL = 0,
+    GEDGE_ACL_WRITE_DACL,
+    GEDGE_ACL_WRITE_OWNER,
+    GEDGE_ACL_GENERIC_WRITE,
+    GEDGE_ACL_EXTENDED_RIGHT,
+    GEDGE_ACL_WRITE_PROP,
+    GEDGE_MEMBER_OF,
+    GEDGE_DELEG_UNCONSTRAINED,   /* 7  "Delegation_Unconstrained" */
+    GEDGE_DELEG_CONSTRAINED,     /* 8  "Delegation_Constrained"   */
+    GEDGE_DELEG_S4U2SELF,        /* 9  "Delegation_S4U2Self"      */
+    GEDGE_DELEG_RBCD,            /* 10 "Delegation_RBCD"  — NEW  */
+    GEDGE_CAN_READ_LAPS          /* 11 "CanReadLAPS"      — NEW  */
 } KESTREL_GRAPH_EDGE_TYPE;
 
 typedef struct _KESTREL_GRAPH_NODE {
@@ -221,6 +224,7 @@ typedef struct _KESTREL_GRAPH_NODE {
     KESTREL_NODE_CLASS  Class;
     BOOL                bEnabled;
     BOOL                bHighValue;
+    BOOL                bUnconstrainedDeleg;
 } KESTREL_GRAPH_NODE;
 
 typedef struct _KESTREL_GRAPH_EDGE {
@@ -246,7 +250,8 @@ typedef struct _KESTREL_GRAPH {
     KESTREL_GRAPH_HASH_ENTRY  rgHash[KESTREL_GRAPH_HASH_SIZE];
     DWORD                     cACLEdges;
     DWORD                     cMemberEdges;
-    DWORD                     cDelegationEdges;
+    DWORD                     cDelegEdges;
+    DWORD                     cLapsEdges;
 } KESTREL_GRAPH;
 
 typedef enum _KESTREL_REPORT_FORMAT {
@@ -311,11 +316,12 @@ VOID KestrelFreeGroupScanResult(
  * KestrelReport.c — v0.4
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-_Must_inspect_result_
-HRESULT KestrelBuildGraph(
-    _In_opt_ KESTREL_ACL_SCAN_RESULT    *pACLResult,
-    _In_opt_ KESTREL_GROUP_SCAN_RESULT  *pGroupResult,
-    _Outptr_ KESTREL_GRAPH             **ppGraph);
+_Must_inspect_result_ HRESULT KestrelBuildGraph(
+    _In_opt_ KESTREL_ACL_SCAN_RESULT* pACLResult,
+    _In_opt_ KESTREL_GROUP_SCAN_RESULT* pGroupResult,
+    _In_opt_ KESTREL_DELEG_SCAN_RESULT* pDelegResult,
+    _In_opt_ KESTREL_LAPS_SCAN_RESULT* pLapsResult,
+    _Outptr_ KESTREL_GRAPH** ppGraph);
 
 _Must_inspect_result_
 HRESULT KestrelWriteHTMLReport(
@@ -333,6 +339,20 @@ KestrelWriteReport(_In_ const KESTREL_GRAPH* pGraph,
 _Must_inspect_result_ HRESULT
 KestrelWriteReportAuto(_In_ const KESTREL_GRAPH* pGraph,
     _In_z_ LPCWSTR pwszOutputPath);
+
+/* ═════════════════════════════════════════════════════════════════
+ * KestrelPolicy.c — v0.5 GPO security policy audit
+ * (KESTREL_POLICY_* types are defined locally in KestrelPolicy.c)
+ * ════════════════════════════════════════════════════════════════ */
+
+struct _KESTREL_POLICY_RESULT;   /* defined in KestrelPolicy.c */
+
+_Must_inspect_result_ HRESULT KestrelRunPolicyAudit(
+    _In_z_   LPCWSTR                         pwszDomainNC,
+    _Outptr_ struct _KESTREL_POLICY_RESULT **ppResult);
+
+VOID KestrelFreePolicyResult(
+    _In_opt_ _Post_ptr_invalid_ struct _KESTREL_POLICY_RESULT *pResult);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * KestrelPath.c — v0.5 (planned)
