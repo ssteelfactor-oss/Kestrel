@@ -61,10 +61,12 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunACL;
     BOOL bRunGroups;
     BOOL bRunPolicy;    /* v0.5 GPO policy audit */
+    BOOL bRunPaths;     /* v0.5 attack-path finder */
     BOOL bRunRPC;       /* v0.5 */
 
     /* Output */
     WCHAR wszReportPath[512];
+    WCHAR wszFrom[256];        /* path finder source; empty = to-tier-0 */
 
     /* Options */
     BOOL bVerbose;
@@ -358,4 +360,30 @@ VOID KestrelFreePolicyResult(
  * KestrelPath.c — v0.5 (planned)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Reserved */
+typedef struct _KESTREL_PATH {
+    DWORD                   *rgNodes;   /* node indices, source..target          */
+    KESTREL_GRAPH_EDGE_TYPE *rgEdges;   /* cHops entries; edge i links node i->i+1 */
+    DWORD                    cHops;     /* number of edges; nodes = cHops + 1     */
+} KESTREL_PATH;
+
+typedef struct _KESTREL_PATH_RESULT {
+    KESTREL_PATH *rgPaths;
+    DWORD         cPaths;
+    DWORD         cCapacity;
+    DWORD         cTargets;     /* high-value targets considered */
+    DWORD         cReachable;   /* targets with >= 1 path        */
+    BOOL          bCapped;      /* output truncated by cap       */
+} KESTREL_PATH_RESULT;
+
+/* Tag well-known tier-0 principals + domain object as bHighValue; returns count. */
+DWORD KestrelTagHighValue(_Inout_ KESTREL_GRAPH *pGraph);
+
+/* pwszFrom NULL/empty -> paths TO tier-0; else forward paths FROM the principal. */
+_Must_inspect_result_ HRESULT KestrelFindPaths(
+    _In_       const KESTREL_GRAPH  *pGraph,
+    _In_opt_z_ LPCWSTR               pwszFrom,
+    _Outptr_   KESTREL_PATH_RESULT **ppResult);
+
+VOID KestrelFreePathResult(
+    _In_opt_ _Post_ptr_invalid_ KESTREL_PATH_RESULT *pResult);
+

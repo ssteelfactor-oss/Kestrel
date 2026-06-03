@@ -130,6 +130,7 @@
     <ClCompile Include="code\adws_scan.c" />
     <ClCompile Include="code\KestrelACL.C" />
     <ClCompile Include="code\KestrelGroup.c" />
+    <ClCompile Include="code\KestrelPath.c" />
     <ClCompile Include="code\KestrelPolicy.c" />
     <ClCompile Include="code\KestrelReport.c" />
     <ClCompile Include="code\main.c" />

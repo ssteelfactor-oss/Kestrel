@@ -33,6 +33,9 @@
     <ClCompile Include="code\KestrelPolicy.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="code\KestrelPath.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Kestrel.h">

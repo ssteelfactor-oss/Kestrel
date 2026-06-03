@@ -54,7 +54,9 @@ KestrelPrintHelp(VOID)
         L"  --stale        Stale computers via lastLogonTimestamp\n"
         L"  --acl          ACL edge extraction via IDirectoryObject\n"
         L"  --groups       Transitive group membership via LDAP_MATCHING_RULE_IN_CHAIN\n"
-        L"  --policy       GPO security policy audit (LLMNR/NBT-NS/WDigest/NTLMv1)\n\n"
+        L"  --policy       GPO security policy audit (LLMNR/NBT-NS/WDigest/NTLMv1)\n"
+        L"  --paths        Attack-path analysis over the graph (to tier-0)\n"
+        L"  --from <prin>  Paths FROM a principal (SID/name); implies --paths\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n\n"
         L"OPTIONS:\n"
@@ -126,6 +128,7 @@ KestrelParseArgs(
             pCfg->bRunACL = TRUE;
             pCfg->bRunGroups = TRUE;
             pCfg->bRunPolicy = TRUE;
+            pCfg->bRunPaths = TRUE;
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -169,6 +172,21 @@ KestrelParseArgs(
             pCfg->bExplicitModules = TRUE;
             continue;
         }
+        if (_wcsicmp(arg, L"--paths") == 0) {
+            pCfg->bRunPaths = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--from") == 0) {
+            if (i + 1 >= argc) {
+                wprintf(L"[!] --from requires a principal (SID or name)\n");
+                return FALSE;
+            }
+            StringCchCopyW(pCfg->wszFrom, ARRAYSIZE(pCfg->wszFrom), argv[++i]);
+            pCfg->bRunPaths = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
 
         /* ── Unknown argument ────────────────────────────────────── */
         wprintf(L"[!] Unknown argument: %s\n", arg);
@@ -186,6 +204,7 @@ KestrelParseArgs(
         pCfg->bRunACL = TRUE;
         pCfg->bRunGroups = TRUE;
         pCfg->bRunPolicy = TRUE;
+        pCfg->bRunPaths = TRUE;
     }
 
     return TRUE;
@@ -223,6 +242,7 @@ int wmain(int argc, wchar_t* argv[])
     KESTREL_LAPS_SCAN_RESULT*  pLaps  = 0;
     struct _KESTREL_POLICY_RESULT* pPolicy = 0;
     KESTREL_GRAPH* pGraph = 0;
+    KESTREL_PATH_RESULT* pPaths = 0;
     VARIANT varDomain, varConfig;
     VariantInit(&varDomain);
     VariantInit(&varConfig);
@@ -318,21 +338,34 @@ int wmain(int argc, wchar_t* argv[])
             wprintf(L"[!] KestrelRunPolicyAudit failed: 0x%08X\n", hr);
     }
 
-    if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation || cfg.bRunLAPS) {
+    if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation || cfg.bRunLAPS || cfg.bRunPaths) {
         hr = KestrelBuildGraph(pACL, pGroup, pDeleg, pLaps, &pGraph);
         if (FAILED(hr)) {
             wprintf(L"[!] KestrelBuildGraph failed: 0x%08X\n", hr);
         }
-        else if (cfg.wszReportPath[0] != L'\0') {
-            hr = KestrelWriteReportAuto(pGraph, cfg.wszReportPath);
-            if (FAILED(hr))
-                wprintf(L"[!] KestrelWriteReportAuto failed: 0x%08X\n", hr);
-        }
         else {
-            wprintf(L"\n[*] Graph: %lu nodes, %lu edges\n",
-                pGraph ? pGraph->cNodes : 0,
-                pGraph ? pGraph->cEdges : 0);
-            wprintf(L"[*] Use --report <path.html|.json|.yaml> to generate a report\n");
+            /* tag tier-0 (also enriches the report's high-value rings) */
+            KestrelTagHighValue(pGraph);
+
+            /* v0.5: attack-path analysis */
+            if (cfg.bRunPaths) {
+                hr = KestrelFindPaths(pGraph,
+                        cfg.wszFrom[0] ? cfg.wszFrom : NULL, &pPaths);
+                if (FAILED(hr))
+                    wprintf(L"[!] KestrelFindPaths failed: 0x%08X\n", hr);
+            }
+
+            if (cfg.wszReportPath[0] != L'\0') {
+                hr = KestrelWriteReportAuto(pGraph, cfg.wszReportPath);
+                if (FAILED(hr))
+                    wprintf(L"[!] KestrelWriteReportAuto failed: 0x%08X\n", hr);
+            }
+            else {
+                wprintf(L"\n[*] Graph: %lu nodes, %lu edges\n",
+                    pGraph ? pGraph->cNodes : 0,
+                    pGraph ? pGraph->cEdges : 0);
+                wprintf(L"[*] Use --report <path.html|.json|.yaml> to generate a report\n");
+            }
         }
     }
 
@@ -343,6 +376,7 @@ Cleanup:
     KestrelFreeDelegScanResult(pDeleg);
     KestrelFreeLapsScanResult(pLaps);
     KestrelFreePolicyResult(pPolicy);
+    KestrelFreePathResult(pPaths);
     KestrelFreeGraph(pGraph);
     CoUninitialize();
     return HRESULT_CODE(hr);
