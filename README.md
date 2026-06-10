@@ -149,7 +149,8 @@ Kestrel.exe --acl --groups --report C:\out\graph.json
 | v0.2    | ✅      | ACL edge extraction via IDirectoryObject                                              |
 | v0.3    | ✅      | Transitive group membership via LDAP_MATCHING_RULE_IN_CHAIN                           |
 | v0.4    | ✅      | In-memory graph from ACL + membership + delegation + LAPS. Interactive HTML report + JSON/YAML export. |
-| v0.5    | 🔲      | BFS path finder. Attack path analysis: any principal → Domain Admins, shortest route. |
+| v0.5    | ✅      | BFS path finder. Attack path analysis: any principal → Domain Admins, shortest route. |
+| v0.6    | ✅      | KestrelTrust & KestrelRoast modules added: trust politiks & kerberoasting analysing   |
 
 ## Screens
 
