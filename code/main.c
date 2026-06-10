@@ -80,6 +80,7 @@ static BOOL
 KestrelParseArgs(
     _In_  int             argc,
     _In_  wchar_t* argv[],
+
     _Out_ KESTREL_CONFIG* pCfg)
 {
     /* Zero-init */
@@ -205,6 +206,7 @@ KestrelParseArgs(
         pCfg->bRunGroups = TRUE;
         pCfg->bRunPolicy = TRUE;
         pCfg->bRunPaths = TRUE;
+        pCfg->bRunRoast = TRUE;
     }
 
     return TRUE;
@@ -236,13 +238,15 @@ int wmain(int argc, wchar_t* argv[])
     WCHAR   wszConfigNC[512] = { 0 };
     WCHAR   wszRootPath[512] = { 0 };
     IADs* pRootDSE = 0;
-    KESTREL_ACL_SCAN_RESULT* pACL = 0;
-    KESTREL_GROUP_SCAN_RESULT* pGroup = 0;
-    KESTREL_DELEG_SCAN_RESULT* pDeleg = 0;
-    KESTREL_LAPS_SCAN_RESULT*  pLaps  = 0;
-    struct _KESTREL_POLICY_RESULT* pPolicy = 0;
-    KESTREL_GRAPH* pGraph = 0;
-    KESTREL_PATH_RESULT* pPaths = 0;
+    KESTREL_ACL_SCAN_RESULT * pACL = 0;
+    KESTREL_GROUP_SCAN_RESULT * pGroup = 0;
+    KESTREL_DELEG_SCAN_RESULT * pDeleg = 0;
+    KESTREL_LAPS_SCAN_RESULT *  pLaps  = 0;
+    struct _KESTREL_POLICY_RESULT * pPolicy = 0;
+    KESTREL_GRAPH * pGraph = 0;
+    KESTREL_PATH_RESULT * pPaths = 0;
+    KESTREL_ROAST_SCAN_RESULT 
+        * pRoast = 0;
     VARIANT varDomain, varConfig;
     VariantInit(&varDomain);
     VariantInit(&varConfig);
@@ -302,6 +306,10 @@ int wmain(int argc, wchar_t* argv[])
         if (FAILED(hr))
             wprintf(L"[!] KestrelScanACLEdges failed: 0x%08X\n", hr);
         KTRACE(L"v0.2 complete — edges: %lu", pACL ? pACL->cEdges : 0);
+        wprintf(L"\n═══ Kestrel — DCSync Rights Analysis ═══\n\n");
+        DWORD cDCSync = KestrelAnalyzeDCSync(pACL);
+        KTRACE(L"DCSync analysis complete — critical principals: %lu", cDCSync);
+
     }
 
     /* ── v0.3: transitive group membership ───────────────────────── */
@@ -336,6 +344,17 @@ int wmain(int argc, wchar_t* argv[])
         hr = KestrelRunPolicyAudit(wszDomainNC, &pPolicy);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunPolicyAudit failed: 0x%08X\n", hr);
+    }
+
+    /* ── v0.6: Kerberoastable + AS-REP Roastable scan ──────────────── */
+    if (cfg.bRunRoast) {
+        wprintf(L"\n═══ Kestrel v0.6 — Roastable Account Scan ═══\n\n");
+        hr = KestrelRunRoastScan(wszDomainNC, & pRoast);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunRoastScan failed: 0x%08X\n", hr);
+        KTRACE(L"Roast scan complete — kerberoastable: %lu, asrep: %lu",
+            pRoast ? pRoast->cKerberoastable : 0,
+            pRoast ? pRoast->cASREP : 0);
     }
 
     if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation || cfg.bRunLAPS || cfg.bRunPaths) {

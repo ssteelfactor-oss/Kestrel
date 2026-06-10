@@ -133,6 +133,7 @@
     <ClCompile Include="code\KestrelPath.c" />
     <ClCompile Include="code\KestrelPolicy.c" />
     <ClCompile Include="code\KestrelReport.c" />
+    <ClCompile Include="code\KestrelRoast.c" />
     <ClCompile Include="code\main.c" />
   </ItemGroup>
   <ItemGroup>

@@ -1804,3 +1804,225 @@ KestrelFreeLapsScanResult(
         HeapFree(GetProcessHeap(), 0, pResult->rgReaders);
     HeapFree(GetProcessHeap(), 0, pResult);
 }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * KestrelAnalyzeDCSync  —  post-process pACL, no LDAP traffic
+ *
+ * Walks already-collected ACL edges and finds principals with:
+ *   DS-Replication-Get-Changes     {1131f6aa-9c07-11d1-f79f-00c04fc2dcd2}
+ *   DS-Replication-Get-Changes-All {1131f6ab-9c07-11d1-f79f-00c04fc2dcd2}
+ *
+ * A principal with BOTH rights can execute a DCSync attack (mimikatz
+ * lsadump::dcsync) and dump all password hashes without touching any DC disk.
+ *
+ * Expected default principals (marked [expected] in output):
+ *   S-1-5-9          — Enterprise Domain Controllers (built-in)
+ *   S-1-5-21-*-516   — Domain Controllers group
+ *   S-1-5-32-544     — Administrators (builtin)
+ *
+ * Any other principal with GetChangesAll is CRITICAL.
+ *
+ * Returns: count of non-expected principals with full DCSync capability.
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+#define DCSYNC_GUID_CHANGES     L"1131f6aa-9c07-11d1-f79f-00c04fc2dcd2"
+#define DCSYNC_GUID_CHANGES_ALL L"1131f6ab-9c07-11d1-f79f-00c04fc2dcd2"
+
+#define DCSYNC_RIGHT_CHANGES     0x1u
+#define DCSYNC_RIGHT_CHANGES_ALL 0x2u
+#define DCSYNC_FULL              (DCSYNC_RIGHT_CHANGES | DCSYNC_RIGHT_CHANGES_ALL)
+
+#define DCSYNC_MAX_ENTRIES 256u
+
+typedef struct _DCSYNC_ENTRY {
+    WCHAR wszSid[128];
+    DWORD dwRights;
+} DCSYNC_ENTRY;
+
+/*
+ * Match a GUID string that may or may not be wrapped in braces.
+ * Comparison is case-insensitive.
+ */
+static BOOL
+_DCSync_GuidMatch(
+    _In_z_ LPCWSTR pwszGuid,
+    _In_z_ LPCWSTR pwszTarget)
+{
+    if (!pwszGuid || !*pwszGuid)
+        return FALSE;
+
+    /* Skip leading brace */
+    if (pwszGuid[0] == L'{')
+        pwszGuid++;
+
+    WCHAR szCopy[64] = { 0 };
+    StringCchCopyW(szCopy, ARRAYSIZE(szCopy), pwszGuid);
+
+    /* Trim trailing brace */
+    SIZE_T cch = wcslen(szCopy);
+    if (cch > 0 && szCopy[cch - 1] == L'}')
+        szCopy[cch - 1] = L'\0';
+
+    return (_wcsicmp(szCopy, pwszTarget) == 0);
+}
+
+/*
+ * Returns TRUE if the SID is one of the well-known default principals
+ * that legitimately hold replication rights in every domain.
+ */
+static BOOL
+_DCSync_IsExpected(_In_z_ LPCWSTR pwszSid)
+{
+    if (!pwszSid)
+        return FALSE;
+
+    /* S-1-5-9  — Enterprise Domain Controllers */
+    if (_wcsicmp(pwszSid, L"S-1-5-9") == 0)
+        return TRUE;
+
+    /* S-1-5-32-544  — BUILTIN\Administrators */
+    if (_wcsicmp(pwszSid, L"S-1-5-32-544") == 0)
+        return TRUE;
+
+    /* S-1-5-21-*-516  — Domain Controllers group (RID 516) */
+    SIZE_T cch = wcslen(pwszSid);
+    if (cch >= 4 &&
+        _wcsicmp(pwszSid + cch - 4, L"-516") == 0 &&
+        wcsncmp(pwszSid, L"S-1-5-21-", 9) == 0)
+        return TRUE;
+
+    /* S-1-5-21-*-519  — Enterprise Admins (expected in forest root) */
+    if (cch >= 4 &&
+        _wcsicmp(pwszSid + cch - 4, L"-519") == 0 &&
+        wcsncmp(pwszSid, L"S-1-5-21-", 9) == 0)
+        return TRUE;
+
+    return FALSE;
+}
+
+_Must_inspect_result_
+DWORD KestrelAnalyzeDCSync(
+    _In_opt_ const KESTREL_ACL_SCAN_RESULT* pACL)
+{
+    if (!pACL || pACL->cEdges == 0) {
+        wprintf(L"  [!] No ACL data — run with --acl first\n\n");
+        return 0;
+    }
+
+    /* Local deduplication table — stack-allocated, no heap needed */
+    DCSYNC_ENTRY entries[DCSYNC_MAX_ENTRIES];
+    DWORD        cEntries = 0;
+    ZeroMemory(entries, sizeof(entries));
+
+    /* ── Walk every collected ACL edge ─────────────────────────── */
+    for (DWORD i = 0; i < pACL->cEdges; i++) {
+        const KESTREL_ACL_EDGE* pE = &pACL->rgEdges[i];
+
+        /* Only allow-ACEs on ExtendedRight type */
+        if (pE->bDeny)
+            continue;
+        if (pE->EdgeType != EDGE_EXTENDED_RIGHT)
+            continue;
+
+        /* Target must be the domain root object */
+        if (_wcsicmp(pE->wszObjectClass, L"domainDNS") != 0)
+            continue;
+
+        /* Identify which replication right this edge grants */
+        DWORD dwRight = 0;
+        if (_DCSync_GuidMatch(pE->wszRightGuid, DCSYNC_GUID_CHANGES))
+            dwRight = DCSYNC_RIGHT_CHANGES;
+        else if (_DCSync_GuidMatch(pE->wszRightGuid, DCSYNC_GUID_CHANGES_ALL))
+            dwRight = DCSYNC_RIGHT_CHANGES_ALL;
+        else
+            continue;
+
+        /* Find existing entry for this trustee or create one */
+        DWORD iEntry = DCSYNC_MAX_ENTRIES;
+        for (DWORD j = 0; j < cEntries; j++) {
+            if (_wcsicmp(entries[j].wszSid, pE->wszTrusteeSid) == 0) {
+                iEntry = j;
+                break;
+            }
+        }
+        if (iEntry == DCSYNC_MAX_ENTRIES) {
+            if (cEntries >= DCSYNC_MAX_ENTRIES)
+                continue;   /* overflow guard — unlikely in any real domain */
+            iEntry = cEntries++;
+            StringCchCopyW(entries[iEntry].wszSid,
+                ARRAYSIZE(entries[iEntry].wszSid),
+                pE->wszTrusteeSid);
+        }
+
+        entries[iEntry].dwRights |= dwRight;
+    }
+
+    /* ── Tally ──────────────────────────────────────────────────── */
+    DWORD cCritical = 0;
+    DWORD cExpected = 0;
+
+    for (DWORD i = 0; i < cEntries; i++) {
+        BOOL bExpected = _DCSync_IsExpected(entries[i].wszSid);
+        if (!bExpected && (entries[i].dwRights & DCSYNC_RIGHT_CHANGES_ALL))
+            cCritical++;
+        if (bExpected)
+            cExpected++;
+    }
+
+    /* ── Console output ─────────────────────────────────────────── */
+    wprintf(L"  Principals found: %lu total  |  %lu critical  |  %lu expected-default\n",
+        cEntries, cCritical, cExpected);
+
+    if (cEntries == 0) {
+        wprintf(L"  [+] No DCSync-related rights found in ACL data\n\n");
+        return 0;
+    }
+
+    wprintf(L"\n  %-64s  %-10s  %s\n",
+        L"Trustee SID", L"Status", L"Rights granted");
+    wprintf(L"  ────────────────────────────────────────────────────────────"
+        L"──────────────────────────────────────────────────\n");
+
+    for (DWORD i = 0; i < cEntries; i++) {
+        BOOL    bExpected = _DCSync_IsExpected(entries[i].wszSid);
+        LPCWSTR pwszStatus;
+        WCHAR   wszRights[96] = { 0 };
+
+        /* Build rights string */
+        if ((entries[i].dwRights & DCSYNC_RIGHT_CHANGES) &&
+            (entries[i].dwRights & DCSYNC_RIGHT_CHANGES_ALL))
+            StringCchCopyW(wszRights, ARRAYSIZE(wszRights),
+                L"GetChanges + GetChangesAll");
+        else if (entries[i].dwRights & DCSYNC_RIGHT_CHANGES_ALL)
+            StringCchCopyW(wszRights, ARRAYSIZE(wszRights), L"GetChangesAll");
+        else
+            StringCchCopyW(wszRights, ARRAYSIZE(wszRights), L"GetChanges");
+
+        /* Status label */
+        if (bExpected) {
+            pwszStatus = L"[expected]";
+        }
+        else if (entries[i].dwRights & DCSYNC_RIGHT_CHANGES_ALL) {
+            pwszStatus = L"CRITICAL  ";   /* can DCSync or is one right away  */
+        }
+        else {
+            pwszStatus = L"partial   ";   /* GetChanges only — incomplete     */
+        }
+
+        wprintf(L"  %-64s  %-10s  %s\n",
+            entries[i].wszSid, pwszStatus, wszRights);
+    }
+
+    if (cCritical > 0) {
+        wprintf(L"\n  [!] %lu non-default principal(s) hold GetChangesAll —"
+            L" DCSync attack is possible.\n", cCritical);
+        wprintf(L"      Resolve SIDs with: Get-ADObject -Filter"
+            L" {objectSID -eq '<SID>'} | Select Name\n");
+    }
+    else {
+        wprintf(L"\n  [+] No unexpected DCSync rights detected.\n");
+    }
+
+    wprintf(L"\n");
+    return cCritical;
+}
