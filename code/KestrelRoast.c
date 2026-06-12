@@ -421,7 +421,7 @@ HRESULT KestrelRunRoastScan(
         L"(&"
             L"(objectCategory=user)"
             L"(servicePrincipalName=*)"
-            L"(!cn=krbtgt)"
+            L"(!(cn=krbtgt))"
             L"(!(userAccountControl:1.2.840.113556.1.4.803:=2))"
         L")",
         ROAST_KERBEROASTABLE,

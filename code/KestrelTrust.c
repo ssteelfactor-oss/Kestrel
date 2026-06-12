@@ -6,15 +6,15 @@
  * invariants cleanly (read-only, DC/directory only, ordinary domain user,
  * no evasion) with no footprint disclaimer, unlike KestrelPolicy (SYSVOL/SMB).
  *
- * Like KestrelPolicy / KestrelRoast this is an audit scan: it returns findings;
- * it does not feed KestrelBuildGraph.
+ * Like KestrelRoast / KestrelGMSA this is an audit scan: it prints its own
+ * console table and returns findings; it does not feed KestrelBuildGraph.
  *
  * Primary finding: missing SID filtering on an inbound external trust — the
  * classic sIDHistory-injection surface. Within-forest trusts deliberately
  * carry no SID filtering (the forest is the boundary) and are not flagged.
  */
 
-#include "Kestrel.h"
+#include "../include/Kestrel.h"
 
 /* trustAttributes bits (MS-ADTS 6.1.6.7.9) */
 #define TA_NON_TRANSITIVE             0x00000001
@@ -29,17 +29,39 @@
 #define TA_PIM_TRUST                  0x00000800
 
 /* ════════════════════════════════════════════════════════════════════════════
- * Local helpers
+ * Internal helpers
  * ════════════════════════════════════════════════════════════════════════════ */
 
-static VOID TrustNote(_Inout_ KESTREL_TRUST_FINDING *pF, _In_z_ LPCWSTR pwszNote)
+static LPCWSTR _TrustDirName(_In_ KESTREL_TRUST_DIRECTION d)
 {
-    if (pF->wszRisk[0])
-        (void)StringCchCatW(pF->wszRisk, ARRAYSIZE(pF->wszRisk), L"; ");
-    (void)StringCchCatW(pF->wszRisk, ARRAYSIZE(pF->wszRisk), pwszNote);
+    switch (d) {
+    case TRUST_DIR_DISABLED:      return L"disabled";
+    case TRUST_DIR_INBOUND:       return L"inbound";
+    case TRUST_DIR_OUTBOUND:      return L"outbound";
+    case TRUST_DIR_BIDIRECTIONAL: return L"bidirectional";
+    default:                      return L"?";
+    }
 }
 
-static VOID TrustClassify(_Inout_ KESTREL_TRUST_FINDING *pF)
+static LPCWSTR _TrustTypeName(_In_ KESTREL_TRUST_TYPE t)
+{
+    switch (t) {
+    case TRUST_TYPE_DOWNLEVEL: return L"downlevel(NT4)";
+    case TRUST_TYPE_UPLEVEL:   return L"uplevel(AD)";
+    case TRUST_TYPE_MIT:       return L"MIT-realm";
+    case TRUST_TYPE_DCE:       return L"DCE";
+    default:                   return L"?";
+    }
+}
+
+static VOID _TrustNote(_Inout_ KESTREL_TRUST_FINDING *pF, _In_z_ LPCWSTR pwszNote)
+{
+    if (pF->wszRisk[0])
+        StringCchCatW(pF->wszRisk, ARRAYSIZE(pF->wszRisk), L"; ");
+    StringCchCatW(pF->wszRisk, ARRAYSIZE(pF->wszRisk), pwszNote);
+}
+
+static VOID _TrustClassify(_Inout_ KESTREL_TRUST_FINDING *pF)
 {
     DWORD a = pF->dwAttributes;
     BOOL  bInbound = (pF->Direction == TRUST_DIR_INBOUND ||
@@ -55,68 +77,69 @@ static VOID TrustClassify(_Inout_ KESTREL_TRUST_FINDING *pF)
 
     pF->wszRisk[0] = L'\0';
 
-    /* Conservative posture notes. Within-forest excluded from the SID-filter
-     * check — otherwise every intra-forest trust false-positives. */
+    /* Within-forest excluded from the SID-filter check — otherwise every
+     * intra-forest trust false-positives (the forest is the boundary). */
     if (bInbound && !pF->bWithinForest && !pF->bSidFiltering)
-        TrustNote(pF, L"no SID filtering (sIDHistory surface)");
+        _TrustNote(pF, L"no SID filtering (sIDHistory surface)");
     if (pF->bTreatAsExternal)
-        TrustNote(pF, L"forest trust treated as external");
+        _TrustNote(pF, L"forest trust treated as external");
     if (pF->bTgtDelegEnabled)
-        TrustNote(pF, L"TGT delegation across trust");
+        _TrustNote(pF, L"TGT delegation across trust");
     if (pF->bRC4)
-        TrustNote(pF, L"RC4 encryption");
+        _TrustNote(pF, L"RC4 encryption");
 }
 
-static BOOL TrustColInt(_In_ IDirectorySearch *pSearch, _In_ ADS_SEARCH_HANDLE hRow,
-                        _In_z_ LPWSTR pwszAttr, _Out_ long *plOut)
+static BOOL _TrustColInt(_In_ IDirectorySearch *pSearch, _In_ ADS_SEARCH_HANDLE hRow,
+                         _In_z_ LPWSTR pwszAttr, _Out_ long *plOut)
 {
     ADS_SEARCH_COLUMN col;
     *plOut = 0;
-    if (IDirectorySearch_GetColumn(pSearch, hRow, pwszAttr, &col) != S_OK)
+    if (pSearch->lpVtbl->GetColumn(pSearch, hRow, pwszAttr, &col) != S_OK)
         return FALSE;
-    if (col.dwADsType == ADSTYPE_INTEGER && col.dwNumValues > 0)
+    if (col.dwADsType == ADSTYPE_INTEGER && col.pADsValues && col.dwNumValues > 0)
         *plOut = (long)col.pADsValues[0].Integer;
-    (void)IDirectorySearch_FreeColumn(pSearch, &col);
+    pSearch->lpVtbl->FreeColumn(pSearch, &col);
     return TRUE;
 }
 
-static BOOL TrustColStr(_In_ IDirectorySearch *pSearch, _In_ ADS_SEARCH_HANDLE hRow,
-                        _In_z_ LPWSTR pwszAttr, _Out_writes_z_(cch) LPWSTR pwszOut, size_t cch)
+static BOOL _TrustColStr(_In_ IDirectorySearch *pSearch, _In_ ADS_SEARCH_HANDLE hRow,
+                         _In_z_ LPWSTR pwszAttr, _Out_writes_z_(cch) LPWSTR pwszOut, size_t cch)
 {
     ADS_SEARCH_COLUMN col;
     pwszOut[0] = L'\0';
-    if (IDirectorySearch_GetColumn(pSearch, hRow, pwszAttr, &col) != S_OK)
+    if (pSearch->lpVtbl->GetColumn(pSearch, hRow, pwszAttr, &col) != S_OK)
         return FALSE;
     if ((col.dwADsType == ADSTYPE_CASE_IGNORE_STRING ||
          col.dwADsType == ADSTYPE_CASE_EXACT_STRING  ||
          col.dwADsType == ADSTYPE_DN_STRING          ||
-         col.dwADsType == ADSTYPE_PRINTABLE_STRING) && col.dwNumValues > 0)
-        (void)StringCchCopyW(pwszOut, cch, col.pADsValues[0].CaseIgnoreString);
-    (void)IDirectorySearch_FreeColumn(pSearch, &col);
+         col.dwADsType == ADSTYPE_PRINTABLE_STRING) &&
+        col.pADsValues && col.dwNumValues > 0 && col.pADsValues[0].CaseIgnoreString)
+        StringCchCopyW(pwszOut, cch, col.pADsValues[0].CaseIgnoreString);
+    pSearch->lpVtbl->FreeColumn(pSearch, &col);
     return TRUE;
 }
 
-static BOOL TrustColSid(_In_ IDirectorySearch *pSearch, _In_ ADS_SEARCH_HANDLE hRow,
-                        _In_z_ LPWSTR pwszAttr, _Out_writes_z_(cch) LPWSTR pwszOut, size_t cch)
+static BOOL _TrustColSid(_In_ IDirectorySearch *pSearch, _In_ ADS_SEARCH_HANDLE hRow,
+                         _In_z_ LPWSTR pwszAttr, _Out_writes_z_(cch) LPWSTR pwszOut, size_t cch)
 {
     ADS_SEARCH_COLUMN col;
     pwszOut[0] = L'\0';
-    if (IDirectorySearch_GetColumn(pSearch, hRow, pwszAttr, &col) != S_OK)
+    if (pSearch->lpVtbl->GetColumn(pSearch, hRow, pwszAttr, &col) != S_OK)
         return FALSE;
-    if (col.dwADsType == ADSTYPE_OCTET_STRING && col.dwNumValues > 0) {
+    if (col.dwADsType == ADSTYPE_OCTET_STRING && col.pADsValues && col.dwNumValues > 0) {
         LPWSTR pwszSid = NULL;
         PSID   pSid    = (PSID)col.pADsValues[0].OctetString.lpValue;
-        if (IsValidSid(pSid) && ConvertSidToStringSidW(pSid, &pwszSid) && pwszSid) {
-            (void)StringCchCopyW(pwszOut, cch, pwszSid);
+        if (pSid && IsValidSid(pSid) && ConvertSidToStringSidW(pSid, &pwszSid) && pwszSid) {
+            StringCchCopyW(pwszOut, cch, pwszSid);
             LocalFree(pwszSid);
         }
     }
-    (void)IDirectorySearch_FreeColumn(pSearch, &col);
+    pSearch->lpVtbl->FreeColumn(pSearch, &col);
     return TRUE;
 }
 
-static HRESULT TrustAppend(_Inout_ KESTREL_TRUST_SCAN_RESULT *pResult,
-                           _In_ const KESTREL_TRUST_FINDING *pF)
+static HRESULT _TrustAppend(_Inout_ KESTREL_TRUST_SCAN_RESULT *pResult,
+                            _In_ const KESTREL_TRUST_FINDING *pF)
 {
     if (pResult->cFindings >= pResult->cCapacity) {
         DWORD  cNew = pResult->cCapacity ? pResult->cCapacity * 2 : 8;
@@ -137,6 +160,34 @@ static HRESULT TrustAppend(_Inout_ KESTREL_TRUST_SCAN_RESULT *pResult,
     }
     pResult->rgFindings[pResult->cFindings++] = *pF;
     return S_OK;
+}
+
+static VOID _TrustPrint(_In_ const KESTREL_TRUST_SCAN_RESULT *pResult)
+{
+    wprintf(L"\n  Trusts: %lu object(s)  |  inbound: %lu  |  risky: %lu\n",
+            pResult->cObjectsScanned, pResult->cInbound, pResult->cRisky);
+
+    if (pResult->cFindings == 0) {
+        wprintf(L"\n  [*] No trustedDomain objects "
+                L"(single-domain / no external trusts).\n\n");
+        return;
+    }
+
+    wprintf(L"\n  %-32s  %-13s  %-15s  %-10s  %s\n",
+            L"Partner", L"Direction", L"Type", L"Attr", L"Risk");
+    wprintf(L"  ─────────────────────────────────────────────────────────"
+            L"──────────────────────────────────────────\n");
+
+    for (DWORD i = 0; i < pResult->cFindings; i++) {
+        const KESTREL_TRUST_FINDING *pF = &pResult->rgFindings[i];
+        wprintf(L"  %-32s  %-13s  %-15s  0x%08lX  %s\n",
+                pF->wszPartner[0]    ? pF->wszPartner : L"?",
+                _TrustDirName(pF->Direction),
+                _TrustTypeName(pF->Type),
+                pF->dwAttributes,
+                pF->wszRisk[0] ? pF->wszRisk : L"-");
+    }
+    wprintf(L"\n");
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -166,9 +217,9 @@ HRESULT KestrelRunTrustScan(
     WCHAR                      wszPath[600];
 
     static LPWSTR rgAttrs[] = {
-        (LPWSTR)L"trustPartner",    (LPWSTR)L"flatName",
-        (LPWSTR)L"trustDirection",  (LPWSTR)L"trustType",
-        (LPWSTR)L"trustAttributes", (LPWSTR)L"securityIdentifier"
+        L"trustPartner",    L"flatName",
+        L"trustDirection",  L"trustType",
+        L"trustAttributes", L"securityIdentifier"
     };
     const DWORD cAttrs = (DWORD)ARRAYSIZE(rgAttrs);
 
@@ -183,49 +234,49 @@ HRESULT KestrelRunTrustScan(
 
     hr = StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszDomainNC);
     if (FAILED(hr))
-        goto cleanup;
+        goto Cleanup;
 
     KTRACE(L"Trust: binding %s", wszPath);
 
     hr = ADsGetObject(wszPath, &IID_IDirectorySearch, (void **)&pSearch);
     if (FAILED(hr)) {
-        KTRACE(L"Trust: ADsGetObject failed 0x%08lX", hr);
-        goto cleanup;
+        wprintf(L"  [!] KestrelRunTrustScan: ADsGetObject failed 0x%08X\n", hr);
+        goto Cleanup;
     }
 
     pref.dwSearchPref   = ADS_SEARCHPREF_SEARCH_SCOPE;
     pref.vValue.dwType  = ADSTYPE_INTEGER;
     pref.vValue.Integer = ADS_SCOPE_SUBTREE;
-    (void)IDirectorySearch_SetSearchPreference(pSearch, &pref, 1);
+    pSearch->lpVtbl->SetSearchPreference(pSearch, &pref, 1);
 
-    hr = IDirectorySearch_ExecuteSearch(pSearch,
-            (LPWSTR)L"(objectClass=trustedDomain)", rgAttrs, cAttrs, &hRow);
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+            L"(objectClass=trustedDomain)", rgAttrs, cAttrs, &hRow);
     if (FAILED(hr)) {
-        KTRACE(L"Trust: ExecuteSearch failed 0x%08lX", hr);
-        goto cleanup;
+        wprintf(L"  [!] KestrelRunTrustScan: ExecuteSearch failed 0x%08X\n", hr);
+        goto Cleanup;
     }
 
-    hr = IDirectorySearch_GetFirstRow(pSearch, hRow);
-    while (hr == S_OK) {
+    for (;;) {
         KESTREL_TRUST_FINDING f;
         long lDir = 0, lType = 0, lAttr = 0;
 
+        hr = pSearch->lpVtbl->GetNextRow(pSearch, hRow);
+        if (hr == S_ADS_NOMORE_ROWS) { hr = S_OK; break; }
+        if (FAILED(hr))              {              break; }
+
         ZeroMemory(&f, sizeof(f));
 
-        TrustColStr(pSearch, hRow, (LPWSTR)L"trustPartner",
-                    f.wszPartner, ARRAYSIZE(f.wszPartner));
-        TrustColStr(pSearch, hRow, (LPWSTR)L"flatName",
-                    f.wszFlatName, ARRAYSIZE(f.wszFlatName));
-        TrustColInt(pSearch, hRow, (LPWSTR)L"trustDirection",  &lDir);
-        TrustColInt(pSearch, hRow, (LPWSTR)L"trustType",       &lType);
-        TrustColInt(pSearch, hRow, (LPWSTR)L"trustAttributes", &lAttr);
-        TrustColSid(pSearch, hRow, (LPWSTR)L"securityIdentifier",
-                    f.wszSid, ARRAYSIZE(f.wszSid));
+        _TrustColStr(pSearch, hRow, L"trustPartner",  f.wszPartner,  ARRAYSIZE(f.wszPartner));
+        _TrustColStr(pSearch, hRow, L"flatName",      f.wszFlatName, ARRAYSIZE(f.wszFlatName));
+        _TrustColInt(pSearch, hRow, L"trustDirection",  &lDir);
+        _TrustColInt(pSearch, hRow, L"trustType",       &lType);
+        _TrustColInt(pSearch, hRow, L"trustAttributes", &lAttr);
+        _TrustColSid(pSearch, hRow, L"securityIdentifier", f.wszSid, ARRAYSIZE(f.wszSid));
 
         f.Direction    = (KESTREL_TRUST_DIRECTION)lDir;
         f.Type         = (KESTREL_TRUST_TYPE)lType;
         f.dwAttributes = (DWORD)lAttr;
-        TrustClassify(&f);
+        _TrustClassify(&f);
 
         pResult->cObjectsScanned++;
         if (f.Direction == TRUST_DIR_INBOUND ||
@@ -234,25 +285,22 @@ HRESULT KestrelRunTrustScan(
         if (f.wszRisk[0])
             pResult->cRisky++;
 
-        hr = TrustAppend(pResult, &f);
+        hr = _TrustAppend(pResult, &f);
         if (FAILED(hr))
-            goto cleanup;
-
-        hr = IDirectorySearch_GetNextRow(pSearch, hRow);
+            goto Cleanup;
     }
-    if (hr == S_ADS_NOMORE_ROWS)
-        hr = S_OK;
 
     KTRACE(L"Trust: %lu object(s), %lu inbound, %lu risky",
            pResult->cObjectsScanned, pResult->cInbound, pResult->cRisky);
 
-cleanup:
+Cleanup:
     if (pSearch) {
         if (hRow)
-            (void)IDirectorySearch_CloseSearchHandle(pSearch, hRow);
-        IDirectorySearch_Release(pSearch);
+            pSearch->lpVtbl->CloseSearchHandle(pSearch, hRow);
+        pSearch->lpVtbl->Release(pSearch);
     }
     if (SUCCEEDED(hr)) {
+        _TrustPrint(pResult);
         *ppResult = pResult;
     } else {
         KestrelFreeTrustScanResult(pResult);

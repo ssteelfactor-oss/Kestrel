@@ -13,9 +13,14 @@
  *   --stale        Stale computers
  *   --acl          ACL edge extraction
  *   --groups       Transitive group membership
+ *   --policy       GPO security policy audit
+ *   --paths        Attack-path analysis
+ *   --roast        Kerberoastable + AS-REP Roastable
+ *   --trust        Domain/forest trust posture
+ *   --gmsa         gMSA password reader enumeration
  *
  * Output:
- *   --report <path>  Generate HTML report
+ *   --report <path>  Generate report (.html / .json / .yaml)
  *
  * Options:
  *   --verbose / -v   Enable trace output
@@ -56,7 +61,10 @@ KestrelPrintHelp(VOID)
         L"  --groups       Transitive group membership via LDAP_MATCHING_RULE_IN_CHAIN\n"
         L"  --policy       GPO security policy audit (LLMNR/NBT-NS/WDigest/NTLMv1)\n"
         L"  --paths        Attack-path analysis over the graph (to tier-0)\n"
-        L"  --from <prin>  Paths FROM a principal (SID/name); implies --paths\n\n"
+        L"  --from <prin>  Paths FROM a principal (SID/name); implies --paths\n"
+        L"  --roast        Kerberoastable + AS-REP Roastable detection\n"
+        L"  --trust        Domain/forest trust posture audit\n"
+        L"  --gmsa         gMSA password reader enumeration\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n\n"
         L"OPTIONS:\n"
@@ -67,9 +75,30 @@ KestrelPrintHelp(VOID)
         L"  Kestrel.exe\n"
         L"  Kestrel.exe --report C:\\out\\report.html\n"
         L"  Kestrel.exe --acl --groups --report C:\\out\\report.html\n"
-        L"  Kestrel.exe --delegation --verbose\n"
+        L"  Kestrel.exe --trust --gmsa --verbose\n"
         L"  Kestrel.exe --report %%USERPROFILE%%\\Desktop\\report.html\n\n"
     );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  Enable every module — shared by --all and the no-args default              */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+static VOID
+KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
+{
+    pCfg->bRunADWS       = TRUE;
+    pCfg->bRunTopology   = TRUE;
+    pCfg->bRunDelegation = TRUE;
+    pCfg->bRunLAPS       = TRUE;
+    pCfg->bRunStale      = TRUE;
+    pCfg->bRunACL        = TRUE;
+    pCfg->bRunGroups     = TRUE;
+    pCfg->bRunPolicy     = TRUE;
+    pCfg->bRunPaths      = TRUE;
+    pCfg->bRunRoast      = TRUE;
+    pCfg->bRunTrust      = TRUE;
+    pCfg->bRunGMSA       = TRUE;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -79,9 +108,8 @@ KestrelPrintHelp(VOID)
 static BOOL
 KestrelParseArgs(
     _In_  int             argc,
-    _In_  wchar_t* argv[],
-
-    _Out_ KESTREL_CONFIG* pCfg)
+    _In_  wchar_t        *argv[],
+    _Out_ KESTREL_CONFIG *pCfg)
 {
     /* Zero-init */
     SecureZeroMemory(pCfg, sizeof(*pCfg));
@@ -121,15 +149,7 @@ KestrelParseArgs(
 
         /* ── Modules ─────────────────────────────────────────────── */
         if (_wcsicmp(arg, L"--all") == 0) {
-            pCfg->bRunADWS = TRUE;
-            pCfg->bRunTopology = TRUE;
-            pCfg->bRunDelegation = TRUE;
-            pCfg->bRunLAPS = TRUE;
-            pCfg->bRunStale = TRUE;
-            pCfg->bRunACL = TRUE;
-            pCfg->bRunGroups = TRUE;
-            pCfg->bRunPolicy = TRUE;
-            pCfg->bRunPaths = TRUE;
+            KestrelEnableAllModules(pCfg);
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -188,6 +208,21 @@ KestrelParseArgs(
             pCfg->bExplicitModules = TRUE;
             continue;
         }
+        if (_wcsicmp(arg, L"--roast") == 0) {
+            pCfg->bRunRoast = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--trust") == 0) {
+            pCfg->bRunTrust = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--gmsa") == 0) {
+            pCfg->bRunGMSA = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
 
         /* ── Unknown argument ────────────────────────────────────── */
         wprintf(L"[!] Unknown argument: %s\n", arg);
@@ -196,18 +231,8 @@ KestrelParseArgs(
     }
 
     /* Default: run all modules if none specified */
-    if (!pCfg->bExplicitModules) {
-        pCfg->bRunADWS = TRUE;
-        pCfg->bRunTopology = TRUE;
-        pCfg->bRunDelegation = TRUE;
-        pCfg->bRunLAPS = TRUE;
-        pCfg->bRunStale = TRUE;
-        pCfg->bRunACL = TRUE;
-        pCfg->bRunGroups = TRUE;
-        pCfg->bRunPolicy = TRUE;
-        pCfg->bRunPaths = TRUE;
-        pCfg->bRunRoast = TRUE;
-    }
+    if (!pCfg->bExplicitModules)
+        KestrelEnableAllModules(pCfg);
 
     return TRUE;
 }
@@ -216,7 +241,7 @@ KestrelParseArgs(
 /*  Entry point                                                                */
 /* ─────────────────────────────────────────────────────────────────────────── */
 
-int wmain(int argc, wchar_t* argv[])
+int wmain(int argc, wchar_t *argv[])
 {
     KESTREL_CONFIG cfg = { 0 };
 
@@ -237,16 +262,17 @@ int wmain(int argc, wchar_t* argv[])
     WCHAR   wszDomainNC[512] = { 0 };
     WCHAR   wszConfigNC[512] = { 0 };
     WCHAR   wszRootPath[512] = { 0 };
-    IADs* pRootDSE = 0;
-    KESTREL_ACL_SCAN_RESULT * pACL = 0;
-    KESTREL_GROUP_SCAN_RESULT * pGroup = 0;
-    KESTREL_DELEG_SCAN_RESULT * pDeleg = 0;
-    KESTREL_LAPS_SCAN_RESULT *  pLaps  = 0;
-    struct _KESTREL_POLICY_RESULT * pPolicy = 0;
-    KESTREL_GRAPH * pGraph = 0;
-    KESTREL_PATH_RESULT * pPaths = 0;
-    KESTREL_ROAST_SCAN_RESULT 
-        * pRoast = 0;
+    IADs   *pRootDSE = 0;
+    KESTREL_ACL_SCAN_RESULT       *pACL    = 0;
+    KESTREL_GROUP_SCAN_RESULT     *pGroup  = 0;
+    KESTREL_DELEG_SCAN_RESULT     *pDeleg  = 0;
+    KESTREL_LAPS_SCAN_RESULT      *pLaps   = 0;
+    struct _KESTREL_POLICY_RESULT *pPolicy = 0;
+    KESTREL_GRAPH                 *pGraph  = 0;
+    KESTREL_PATH_RESULT           *pPaths  = 0;
+    KESTREL_ROAST_SCAN_RESULT     *pRoast  = 0;
+    KESTREL_TRUST_SCAN_RESULT     *pTrust  = 0;
+    KESTREL_GMSA_SCAN_RESULT      *pGMSA   = 0;
     VARIANT varDomain, varConfig;
     VariantInit(&varDomain);
     VariantInit(&varConfig);
@@ -309,7 +335,6 @@ int wmain(int argc, wchar_t* argv[])
         wprintf(L"\n═══ Kestrel — DCSync Rights Analysis ═══\n\n");
         DWORD cDCSync = KestrelAnalyzeDCSync(pACL);
         KTRACE(L"DCSync analysis complete — critical principals: %lu", cDCSync);
-
     }
 
     /* ── v0.3: transitive group membership ───────────────────────── */
@@ -320,7 +345,7 @@ int wmain(int argc, wchar_t* argv[])
         KTRACE(L"v0.3 complete — groups: %lu", pGroup ? pGroup->cGroups : 0);
     }
 
-    /* ── v0.4: build graph + report (HTML / JSON / YAML by extension) ── */
+    /* ── v0.4: delegation + LAPS (graph fed below) ───────────────── */
     if (cfg.bRunDelegation) {
         wprintf(L"\n═══ Kestrel v0.4 — Delegation Surface ═══\n\n");
         hr = KestrelScanDelegation(wszDomainNC, &pDeleg);
@@ -339,17 +364,17 @@ int wmain(int argc, wchar_t* argv[])
             pLaps ? pLaps->cReaders : 0);
     }
 
-    /* ── v0.5: GPO policy audit (LLMNR / NBT-NS / WDigest / NTLMv1 / LDAP signing) ── */
+    /* ── v0.5: GPO policy audit ──────────────────────────────────── */
     if (cfg.bRunPolicy) {
         hr = KestrelRunPolicyAudit(wszDomainNC, &pPolicy);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunPolicyAudit failed: 0x%08X\n", hr);
     }
 
-    /* ── v0.6: Kerberoastable + AS-REP Roastable scan ──────────────── */
+    /* ── v0.6: Kerberoastable + AS-REP Roastable scan ────────────── */
     if (cfg.bRunRoast) {
         wprintf(L"\n═══ Kestrel v0.6 — Roastable Account Scan ═══\n\n");
-        hr = KestrelRunRoastScan(wszDomainNC, & pRoast);
+        hr = KestrelRunRoastScan(wszDomainNC, &pRoast);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunRoastScan failed: 0x%08X\n", hr);
         KTRACE(L"Roast scan complete — kerberoastable: %lu, asrep: %lu",
@@ -357,7 +382,31 @@ int wmain(int argc, wchar_t* argv[])
             pRoast ? pRoast->cASREP : 0);
     }
 
-    if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation || cfg.bRunLAPS || cfg.bRunPaths) {
+    /* ── v0.7: domain trust posture audit ────────────────────────── */
+    if (cfg.bRunTrust) {
+        wprintf(L"\n═══ Kestrel v0.7 — Domain Trust Posture ═══\n\n");
+        hr = KestrelRunTrustScan(wszDomainNC, &pTrust);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunTrustScan failed: 0x%08X\n", hr);
+        KTRACE(L"trust scan complete — objects: %lu, risky: %lu",
+            pTrust ? pTrust->cObjectsScanned : 0,
+            pTrust ? pTrust->cRisky : 0);
+    }
+
+    /* ── v0.7: gMSA password reader enumeration ──────────────────── */
+    if (cfg.bRunGMSA) {
+        wprintf(L"\n═══ Kestrel v0.7 — gMSA Password Reader Scan ═══\n\n");
+        hr = KestrelRunGMSAScan(wszDomainNC, &pGMSA);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunGMSAScan failed: 0x%08X\n", hr);
+        KTRACE(L"gMSA scan complete — objects: %lu, readers: %lu",
+            pGMSA ? pGMSA->cGmsaScanned : 0,
+            pGMSA ? pGMSA->cReaders : 0);
+    }
+
+    /* ── v0.4: build graph + report (HTML / JSON / YAML by extension) ── */
+    if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation ||
+        cfg.bRunLAPS || cfg.bRunPaths) {
         hr = KestrelBuildGraph(pACL, pGroup, pDeleg, pLaps, &pGraph);
         if (FAILED(hr)) {
             wprintf(L"[!] KestrelBuildGraph failed: 0x%08X\n", hr);
@@ -396,6 +445,9 @@ Cleanup:
     KestrelFreeLapsScanResult(pLaps);
     KestrelFreePolicyResult(pPolicy);
     KestrelFreePathResult(pPaths);
+    KestrelFreeRoastScanResult(pRoast);
+    KestrelFreeTrustScanResult(pTrust);
+    KestrelFreeGMSAScanResult(pGMSA);
     KestrelFreeGraph(pGraph);
     CoUninitialize();
     return HRESULT_CODE(hr);

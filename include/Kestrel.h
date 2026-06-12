@@ -8,7 +8,10 @@
  *   KestrelGroup.c  — v0.3  transitive group membership
  *   KestrelReport.c — v0.4  in-memory graph + HTML report
  *   KestrelPath.c   — v0.5  BFS path finder
+ *   KestrelPolicy.c — v0.5  GPO security policy audit
  *   KestrelRoast.c  — v0.6  Kerberoastable + AS-REP Roastable detection
+ *   KestrelTrust.c  — v0.7  Domain trust posture audit
+ *   KestrelGMSA.c   — v0.7  gMSA password reader enumeration
  */
 
 #pragma once
@@ -49,7 +52,7 @@
 #define KESTREL_STALE_DAYS          90
 #define KESTREL_FT_PER_DAY          (10000000ULL * 86400ULL)
 
-#define KESTREL_VERSION L"0.6-dev"
+#define KESTREL_VERSION L"0.7-dev"
 
 typedef struct _KESTREL_CONFIG {
     /* Modules */
@@ -60,18 +63,20 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunStale;
     BOOL bRunACL;
     BOOL bRunGroups;
-    BOOL bRunPolicy;    /* v0.5 GPO policy audit   */
-    BOOL bRunPaths;     /* v0.5 attack-path finder */
-    BOOL bRunRPC;       /* v0.5                    */
-    BOOL bRunRoast;     /* v0.6 Kerberoast / AS-REP Roast scan */
-    BOOL bRunTrust;     /* v0.7 trust posture audit */
+    BOOL bRunPolicy;    /* v0.5 GPO policy audit        */
+    BOOL bRunPaths;     /* v0.5 attack-path finder      */
+    BOOL bRunRPC;       /* v0.5                         */
+    BOOL bRunRoast;     /* v0.6 Kerberoast / AS-REP     */
+    BOOL bRunTrust;     /* v0.7 trust posture audit     */
+    BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
+
     /* Output */
     WCHAR wszReportPath[512];
     WCHAR wszFrom[256];        /* path finder source; empty = to-tier-0 */
 
     /* Options */
     BOOL bVerbose;
-    BOOL bExplicitModules; /* TRUE если хоть один модуль задан явно */
+    BOOL bExplicitModules;
 } KESTREL_CONFIG;
 
 
@@ -81,7 +86,7 @@ extern BOOL g_bVerbose;
     if (g_bVerbose) wprintf(L"[TRACE] " fmt L"\n", ##__VA_ARGS__)
 
 /* ════════════════════════════════════════════════════════════════════════════
- * Shared types — KestrelACL.C
+ * Shared types — KestrelACL.C (v0.2)
  * ════════════════════════════════════════════════════════════════════════════ */
 
 typedef enum _KESTREL_ACL_EDGE_TYPE {
@@ -119,9 +124,9 @@ typedef struct _KESTREL_ACL_SCAN_RESULT {
 /* ── Delegation ──────────────────────────────────────────────────────────── */
 typedef enum _KESTREL_DELEG_KIND {
     DELEG_UNCONSTRAINED = 0,
-    DELEG_CONSTRAINED,             /* Kerberos-only                    */
-    DELEG_CONSTRAINED_PROTOTRANS,  /* + TRUSTED_TO_AUTH (S4U2Self)     */
-    DELEG_RBCD                     /* resource-based, allowed principal */
+    DELEG_CONSTRAINED,
+    DELEG_CONSTRAINED_PROTOTRANS,
+    DELEG_RBCD
 } KESTREL_DELEG_KIND;
 
 typedef struct _KESTREL_DELEG_FINDING {
@@ -129,11 +134,11 @@ typedef struct _KESTREL_DELEG_FINDING {
     WCHAR              wszSam[64];
     WCHAR              wszObjectClass[64];
     KESTREL_DELEG_KIND Kind;
-    WCHAR              wszDetail[512];  /* SPN, allowed-SID, or marker */
+    WCHAR              wszDetail[512];
 } KESTREL_DELEG_FINDING;
 
 typedef struct _KESTREL_DELEG_SCAN_RESULT {
-    KESTREL_DELEG_FINDING* rgFindings;
+    KESTREL_DELEG_FINDING *rgFindings;
     DWORD                  cFindings;
     DWORD                  cCapacity;
     DWORD                  cObjectsScanned;
@@ -148,7 +153,7 @@ typedef struct _KESTREL_LAPS_READER {
 } KESTREL_LAPS_READER;
 
 typedef struct _KESTREL_LAPS_SCAN_RESULT {
-    KESTREL_LAPS_READER* rgReaders;
+    KESTREL_LAPS_READER *rgReaders;
     DWORD                cReaders;
     DWORD                cCapacity;
     DWORD                cComputersScanned;
@@ -158,7 +163,7 @@ typedef struct _KESTREL_LAPS_SCAN_RESULT {
 } KESTREL_LAPS_SCAN_RESULT;
 
 /* ════════════════════════════════════════════════════════════════════════════
- * Shared types — KestrelGroup.c
+ * Shared types — KestrelGroup.c (v0.3)
  * ════════════════════════════════════════════════════════════════════════════ */
 
 typedef struct _KESTREL_MEMBER {
@@ -212,11 +217,12 @@ typedef enum _KESTREL_GRAPH_EDGE_TYPE {
     GEDGE_ACL_EXTENDED_RIGHT,
     GEDGE_ACL_WRITE_PROP,
     GEDGE_MEMBER_OF,
-    GEDGE_DELEG_UNCONSTRAINED,   /* 7  "Delegation_Unconstrained" */
-    GEDGE_DELEG_CONSTRAINED,     /* 8  "Delegation_Constrained"   */
-    GEDGE_DELEG_S4U2SELF,        /* 9  "Delegation_S4U2Self"      */
-    GEDGE_DELEG_RBCD,            /* 10 "Delegation_RBCD"          */
-    GEDGE_CAN_READ_LAPS          /* 11 "CanReadLAPS"              */
+    GEDGE_DELEG_UNCONSTRAINED,
+    GEDGE_DELEG_CONSTRAINED,
+    GEDGE_DELEG_S4U2SELF,
+    GEDGE_DELEG_RBCD,
+    GEDGE_CAN_READ_LAPS,
+    GEDGE_CAN_READ_GMSA_PASSWORD   /* 12 — v0.7 */
 } KESTREL_GRAPH_EDGE_TYPE;
 
 typedef struct _KESTREL_GRAPH_NODE {
@@ -283,9 +289,9 @@ typedef struct _KESTREL_ROAST_FINDING {
     WCHAR    wszSAM[128];
     WCHAR    wszDN[512];
     WCHAR    wszSid[128];
-    WCHAR    wszSPNs[512];   /* Kerberoastable only; values joined with "; " */
-    LONGLONG llPwdLastSet;   /* FILETIME 64-bit; 0 = not set                 */
-    LONGLONG llLastLogon;    /* FILETIME 64-bit; 0 = not set                 */
+    WCHAR    wszSPNs[512];
+    LONGLONG llPwdLastSet;
+    LONGLONG llLastLogon;
     DWORD    dwUAC;
 } KESTREL_ROAST_FINDING;
 
@@ -297,6 +303,70 @@ typedef struct _KESTREL_ROAST_SCAN_RESULT {
     DWORD                  cASREP;
     DWORD                  cObjectsScanned;
 } KESTREL_ROAST_SCAN_RESULT;
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * Shared types — KestrelTrust.c (v0.7)
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+typedef enum _KESTREL_TRUST_DIRECTION {
+    TRUST_DIR_DISABLED      = 0,
+    TRUST_DIR_INBOUND       = 1,
+    TRUST_DIR_OUTBOUND      = 2,
+    TRUST_DIR_BIDIRECTIONAL = 3,
+} KESTREL_TRUST_DIRECTION;
+
+typedef enum _KESTREL_TRUST_TYPE {
+    TRUST_TYPE_DOWNLEVEL = 1,
+    TRUST_TYPE_UPLEVEL   = 2,
+    TRUST_TYPE_MIT       = 3,
+    TRUST_TYPE_DCE       = 4,
+} KESTREL_TRUST_TYPE;
+
+typedef struct _KESTREL_TRUST_FINDING {
+    WCHAR                   wszPartner[256];
+    WCHAR                   wszFlatName[64];
+    WCHAR                   wszSid[128];
+    KESTREL_TRUST_DIRECTION Direction;
+    KESTREL_TRUST_TYPE      Type;
+    DWORD                   dwAttributes;
+    BOOL                    bSidFiltering;
+    BOOL                    bWithinForest;
+    BOOL                    bForestTransitive;
+    BOOL                    bTransitive;
+    BOOL                    bRC4;
+    BOOL                    bTgtDelegEnabled;
+    BOOL                    bTreatAsExternal;
+    WCHAR                   wszRisk[256];
+} KESTREL_TRUST_FINDING;
+
+typedef struct _KESTREL_TRUST_SCAN_RESULT {
+    KESTREL_TRUST_FINDING *rgFindings;
+    DWORD                  cFindings;
+    DWORD                  cCapacity;
+    DWORD                  cInbound;
+    DWORD                  cRisky;
+    DWORD                  cObjectsScanned;
+} KESTREL_TRUST_SCAN_RESULT;
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * Shared types — KestrelGMSA.c (v0.7)
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+typedef struct _KESTREL_GMSA_READER {
+    WCHAR wszGmsaDN[512];       /* DN of the gMSA object                       */
+    WCHAR wszGmsaSam[128];      /* sAMAccountName of the gMSA                  */
+    WCHAR wszTrusteeSid[128];   /* SID of the principal in the membership DACL */
+    BOOL  bDeny;                /* TRUE = explicit DENY ACE                    */
+    BOOL  bInherited;           /* TRUE = inherited ACE                        */
+} KESTREL_GMSA_READER;
+
+typedef struct _KESTREL_GMSA_SCAN_RESULT {
+    KESTREL_GMSA_READER *rgReaders;
+    DWORD                cReaders;
+    DWORD                cCapacity;
+    DWORD                cGmsaScanned;
+    DWORD                cErrors;
+} KESTREL_GMSA_SCAN_RESULT;
 
 /* ════════════════════════════════════════════════════════════════════════════
  * adws_scan.c — v0.1
@@ -317,8 +387,8 @@ VOID KestrelFreeDelegScanResult(
     _In_opt_ _Post_ptr_invalid_ KESTREL_DELEG_SCAN_RESULT *pResult);
 
 _Must_inspect_result_ HRESULT KestrelScanLapsReaders(
-    _In_z_   LPCWSTR                   pwszDomainNC,
-    _In_z_   LPCWSTR                   pwszConfigNC,
+    _In_z_   LPCWSTR                    pwszDomainNC,
+    _In_z_   LPCWSTR                    pwszConfigNC,
     _Outptr_ KESTREL_LAPS_SCAN_RESULT **ppResult);
 
 VOID KestrelFreeLapsScanResult(
@@ -332,6 +402,10 @@ HRESULT KestrelScanACLEdges(
 
 VOID KestrelFreeACLScanResult(
     _In_opt_ _Post_ptr_invalid_ KESTREL_ACL_SCAN_RESULT *pResult);
+
+_Must_inspect_result_
+DWORD KestrelAnalyzeDCSync(
+    _In_opt_ const KESTREL_ACL_SCAN_RESULT *pACL);
 
 /* ════════════════════════════════════════════════════════════════════════════
  * KestrelGroup.c — v0.3
@@ -377,28 +451,35 @@ KestrelWriteReportAuto(
     _In_z_ LPCWSTR              pwszOutputPath);
 
 /* ════════════════════════════════════════════════════════════════════════════
- * KestrelPolicy.c — v0.5 GPO security policy audit
+ * KestrelPolicy.c — v0.5
  * ════════════════════════════════════════════════════════════════════════════ */
 
+struct _KESTREL_POLICY_RESULT;   /* defined in KestrelPolicy.c */
 
+_Must_inspect_result_ HRESULT KestrelRunPolicyAudit(
+    _In_z_   LPCWSTR                         pwszDomainNC,
+    _Outptr_ struct _KESTREL_POLICY_RESULT **ppResult);
+
+VOID KestrelFreePolicyResult(
+    _In_opt_ _Post_ptr_invalid_ struct _KESTREL_POLICY_RESULT *pResult);
 
 /* ════════════════════════════════════════════════════════════════════════════
  * KestrelPath.c — v0.5
  * ════════════════════════════════════════════════════════════════════════════ */
 
 typedef struct _KESTREL_PATH {
-    DWORD                   *rgNodes;   /* node indices, source..target          */
-    KESTREL_GRAPH_EDGE_TYPE *rgEdges;   /* cHops entries; edge i links node i->i+1 */
-    DWORD                    cHops;     /* number of edges; nodes = cHops + 1   */
+    DWORD                   *rgNodes;
+    KESTREL_GRAPH_EDGE_TYPE *rgEdges;
+    DWORD                    cHops;
 } KESTREL_PATH;
 
 typedef struct _KESTREL_PATH_RESULT {
     KESTREL_PATH *rgPaths;
     DWORD         cPaths;
     DWORD         cCapacity;
-    DWORD         cTargets;     /* high-value targets considered */
-    DWORD         cReachable;   /* targets with >= 1 path        */
-    BOOL          bCapped;      /* output truncated by cap       */
+    DWORD         cTargets;
+    DWORD         cReachable;
+    BOOL          bCapped;
 } KESTREL_PATH_RESULT;
 
 DWORD KestrelTagHighValue(_Inout_ KESTREL_GRAPH *pGraph);
@@ -410,16 +491,6 @@ _Must_inspect_result_ HRESULT KestrelFindPaths(
 
 VOID KestrelFreePathResult(
     _In_opt_ _Post_ptr_invalid_ KESTREL_PATH_RESULT *pResult);
-
-//struct _KESTREL_POLICY_RESULT;   /* defined in KestrelPolicy.c */
-
-_Must_inspect_result_ HRESULT
-KestrelRunPolicyAudit(
-    _In_z_   LPCWSTR                         pwszDomainNC,
-    _Outptr_ struct _KESTREL_POLICY_RESULT** ppResult);
-
-VOID KestrelFreePolicyResult(
-    _In_opt_ _Post_ptr_invalid_ struct _KESTREL_POLICY_RESULT* pResult);
 
 /* ════════════════════════════════════════════════════════════════════════════
  * KestrelRoast.c — v0.6
@@ -433,63 +504,26 @@ HRESULT KestrelRunRoastScan(
 VOID KestrelFreeRoastScanResult(
     _In_opt_ _Post_ptr_invalid_ KESTREL_ROAST_SCAN_RESULT *pResult);
 
-/*
- * Post-process pACL to find principals with DS-Replication rights.
- * No LDAP traffic. Returns count of non-default principals with full
- * DCSync capability (GetChanges + GetChangesAll on domainDNS object).
- */
-_Must_inspect_result_
-DWORD KestrelAnalyzeDCSync(
-    _In_opt_ const KESTREL_ACL_SCAN_RESULT* pACL);
-
 /* ════════════════════════════════════════════════════════════════════════════
- * Shared types — KestrelTrust.c (v0.7)
+ * KestrelTrust.c — v0.7
  * ════════════════════════════════════════════════════════════════════════════ */
-
-typedef enum _KESTREL_TRUST_DIRECTION {
-    TRUST_DIR_DISABLED = 0,
-    TRUST_DIR_INBOUND = 1,
-    TRUST_DIR_OUTBOUND = 2,
-    TRUST_DIR_BIDIRECTIONAL = 3,
-} KESTREL_TRUST_DIRECTION;
-
-typedef enum _KESTREL_TRUST_TYPE {
-    TRUST_TYPE_DOWNLEVEL = 1,   /* NT4            */
-    TRUST_TYPE_UPLEVEL = 2,   /* AD             */
-    TRUST_TYPE_MIT = 3,   /* Kerberos realm */
-    TRUST_TYPE_DCE = 4,
-} KESTREL_TRUST_TYPE;
-
-typedef struct _KESTREL_TRUST_FINDING {
-    WCHAR                   wszPartner[256];   /* trustPartner (DNS) */
-    WCHAR                   wszFlatName[64];   /* NetBIOS            */
-    WCHAR                   wszSid[128];       /* trusted domain SID */
-    KESTREL_TRUST_DIRECTION Direction;
-    KESTREL_TRUST_TYPE      Type;
-    DWORD                   dwAttributes;      /* raw trustAttributes */
-    BOOL                    bSidFiltering;     /* QUARANTINED_DOMAIN  */
-    BOOL                    bWithinForest;
-    BOOL                    bForestTransitive;
-    BOOL                    bTransitive;
-    BOOL                    bRC4;
-    BOOL                    bTgtDelegEnabled;
-    BOOL                    bTreatAsExternal;
-    WCHAR                   wszRisk[256];      /* joined posture notes */
-} KESTREL_TRUST_FINDING;
-
-typedef struct _KESTREL_TRUST_SCAN_RESULT {
-    KESTREL_TRUST_FINDING* rgFindings;
-    DWORD                  cFindings;
-    DWORD                  cCapacity;
-    DWORD                  cInbound;
-    DWORD                  cRisky;
-    DWORD                  cObjectsScanned;
-} KESTREL_TRUST_SCAN_RESULT;
 
 _Must_inspect_result_
 HRESULT KestrelRunTrustScan(
     _In_z_   LPCWSTR                     pwszDomainNC,
-    _Outptr_ KESTREL_TRUST_SCAN_RESULT** ppResult);
+    _Outptr_ KESTREL_TRUST_SCAN_RESULT **ppResult);
 
 VOID KestrelFreeTrustScanResult(
-    _In_opt_ _Post_ptr_invalid_ KESTREL_TRUST_SCAN_RESULT* pResult);
+    _In_opt_ _Post_ptr_invalid_ KESTREL_TRUST_SCAN_RESULT *pResult);
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * KestrelGMSA.c — v0.7
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+_Must_inspect_result_
+HRESULT KestrelRunGMSAScan(
+    _In_z_   LPCWSTR                    pwszDomainNC,
+    _Outptr_ KESTREL_GMSA_SCAN_RESULT **ppResult);
+
+VOID KestrelFreeGMSAScanResult(
+    _In_opt_ _Post_ptr_invalid_ KESTREL_GMSA_SCAN_RESULT *pResult);
