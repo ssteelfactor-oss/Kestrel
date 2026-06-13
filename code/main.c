@@ -393,7 +393,7 @@ int wmain(int argc, wchar_t *argv[])
             pTrust ? pTrust->cRisky : 0);
     }
 
-    /* ── v0.7: gMSA password reader enumeration ──────────────────── */
+    /* ── v0.7.1: gMSA password reader enumeration ──────────────────── */
     if (cfg.bRunGMSA) {
         wprintf(L"\n═══ Kestrel v0.7 — gMSA Password Reader Scan ═══\n\n");
         hr = KestrelRunGMSAScan(wszDomainNC, &pGMSA);
@@ -407,7 +407,7 @@ int wmain(int argc, wchar_t *argv[])
     /* ── v0.4: build graph + report (HTML / JSON / YAML by extension) ── */
     if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation ||
         cfg.bRunLAPS || cfg.bRunPaths) {
-        hr = KestrelBuildGraph(pACL, pGroup, pDeleg, pLaps, &pGraph);
+        hr = KestrelBuildGraph(pACL, pGroup, pDeleg, pLaps, pGMSA, pRoast, &pGraph);
         if (FAILED(hr)) {
             wprintf(L"[!] KestrelBuildGraph failed: 0x%08X\n", hr);
         }

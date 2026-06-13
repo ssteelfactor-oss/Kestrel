@@ -105,6 +105,7 @@ _GmsaEmitReadersFromSd(
     _In_    PSECURITY_DESCRIPTOR      pSD,
     _In_z_  LPCWSTR                   pwszGmsaDN,
     _In_z_  LPCWSTR                   pwszGmsaSam,
+    _In_z_  LPCWSTR                   pwszGmsaSid,
     _Inout_ KESTREL_GMSA_SCAN_RESULT *pResult)
 {
     PACL pDacl    = NULL;
@@ -144,6 +145,7 @@ _GmsaEmitReadersFromSd(
         KESTREL_GMSA_READER r = { 0 };
         StringCchCopyW(r.wszGmsaDN,     ARRAYSIZE(r.wszGmsaDN),     pwszGmsaDN);
         StringCchCopyW(r.wszGmsaSam,    ARRAYSIZE(r.wszGmsaSam),    pwszGmsaSam);
+        StringCchCopyW(r.wszGmsaSid,    ARRAYSIZE(r.wszGmsaSid),    pwszGmsaSid);
         StringCchCopyW(r.wszTrusteeSid, ARRAYSIZE(r.wszTrusteeSid), pwszSidStr);
         r.bDeny      = bDeny;
         r.bInherited = !!(pHdr->AceFlags & INHERITED_ACE);
@@ -311,9 +313,20 @@ HRESULT KestrelRunGMSAScan(
             pSearch->lpVtbl->FreeColumn(pSearch, &colSam);
         }
 
-        /* objectSid — store on pResult for future graph integration */
+        /* objectSid — gMSA node key for the graph */
+        WCHAR wszGmsaSid[128] = { 0 };
         if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
                 L"objectSid", &colSid))) {
+            if (colSid.dwADsType == ADSTYPE_OCTET_STRING &&
+                colSid.pADsValues && colSid.dwNumValues > 0) {
+                PSID   pSid    = (PSID)colSid.pADsValues[0].OctetString.lpValue;
+                LPWSTR pwszSid = NULL;
+                if (pSid && IsValidSid(pSid) &&
+                    ConvertSidToStringSidW(pSid, &pwszSid) && pwszSid) {
+                    StringCchCopyW(wszGmsaSid, ARRAYSIZE(wszGmsaSid), pwszSid);
+                    LocalFree(pwszSid);
+                }
+            }
             pSearch->lpVtbl->FreeColumn(pSearch, &colSid);
         }
 
@@ -342,7 +355,7 @@ HRESULT KestrelRunGMSAScan(
             if (pSD && IsValidSecurityDescriptor(pSD)) {
                 bGotMSD = TRUE;
                 DWORD cBefore = pResult->cReaders;
-                hr = _GmsaEmitReadersFromSd(pSD, wszDN, wszSam, pResult);
+                hr = _GmsaEmitReadersFromSd(pSD, wszDN, wszSam, wszGmsaSid, pResult);
                 if (FAILED(hr)) {
                     pSearch->lpVtbl->FreeColumn(pSearch, &colMSD);
                     goto Cleanup;

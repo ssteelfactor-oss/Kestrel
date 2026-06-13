@@ -116,6 +116,27 @@ KestrelGraphAddLapsEdges(
     _In_     KESTREL_LAPS_SCAN_RESULT *pLapsResult);
 
 /*
+ * Phase 5: gMSA password-reader edges. Each ALLOW trustee in a gMSA's
+ * msDS-GroupMSAMembership DACL becomes a reader → gMSA "CanReadGMSAPassword"
+ * edge. The gMSA node is keyed by its own objectSid.
+ */
+_Must_inspect_result_
+static HRESULT
+KestrelGraphAddGmsaEdges(
+    _Inout_  KESTREL_GRAPH            *pGraph,
+    _In_     KESTREL_GMSA_SCAN_RESULT *pGmsaResult);
+
+/*
+ * Phase 6: fold Kerberoastable / AS-REP Roastable status onto existing nodes
+ * as properties (no edges). Matches by SID; only flags nodes already present
+ * in the graph (reachable via ACL / membership / delegation).
+ */
+static VOID
+KestrelGraphApplyRoast(
+    _Inout_  KESTREL_GRAPH             *pGraph,
+    _In_     KESTREL_ROAST_SCAN_RESULT *pRoastResult);
+
+/*
  * Extract the host component of an SPN ("service/host[:port][/name]" → "host").
  * Falls back to copying the whole SPN if it carries no '/'.
  */
@@ -183,6 +204,8 @@ KestrelGuessFormat(_In_z_ LPCWSTR pwszPath);
  *   pGroupResult  — output of KestrelRunGroupScan       (may be NULL)
  *   pDelegResult  — output of KestrelScanDelegation     (may be NULL)
  *   pLapsResult   — output of KestrelScanLapsReaders    (may be NULL)
+ *   pGMSAResult   — output of KestrelRunGMSAScan        (may be NULL)
+ *   pRoastResult  — output of KestrelRunRoastScan       (may be NULL)
  *   ppGraph       — receives allocated graph; free via KestrelFreeGraph
  */
 _Must_inspect_result_
@@ -192,6 +215,8 @@ KestrelBuildGraph(
     _In_opt_ KESTREL_GROUP_SCAN_RESULT  *pGroupResult,
     _In_opt_ KESTREL_DELEG_SCAN_RESULT  *pDelegResult,
     _In_opt_ KESTREL_LAPS_SCAN_RESULT   *pLapsResult,
+    _In_opt_ KESTREL_GMSA_SCAN_RESULT   *pGMSAResult,
+    _In_opt_ KESTREL_ROAST_SCAN_RESULT  *pRoastResult,
     _Outptr_ KESTREL_GRAPH             **ppGraph)
 {
     HRESULT        hr     = S_OK;
@@ -247,6 +272,19 @@ KestrelBuildGraph(
         hr = KestrelGraphAddLapsEdges(pGraph, pLapsResult);
         if (FAILED(hr)) goto Cleanup;
         wprintf(L"  [*] LAPS-read edges:  %lu\n", pGraph->cLapsEdges);
+    }
+
+    /* Phase 5: gMSA password readers (reader → gMSA) */
+    if (pGMSAResult && pGMSAResult->cReaders > 0) {
+        hr = KestrelGraphAddGmsaEdges(pGraph, pGMSAResult);
+        if (FAILED(hr)) goto Cleanup;
+        wprintf(L"  [*] gMSA-read edges:  %lu\n", pGraph->cGmsaEdges);
+    }
+
+    /* Phase 6: Kerberoastable / AS-REP Roastable node flags (no edges) */
+    if (pRoastResult && pRoastResult->cFindings > 0) {
+        KestrelGraphApplyRoast(pGraph, pRoastResult);
+        wprintf(L"  [*] Roastable flags:  %lu\n", pRoastResult->cFindings);
     }
 
     wprintf(L"  [*] Total nodes:      %lu\n", pGraph->cNodes);
@@ -362,6 +400,8 @@ KestrelEmitHtml(
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#9B59B6\"></div>Delegation</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#C39BD3\"></div>RBCD</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#16A085\"></div>CanReadLAPS</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#E67E22\"></div>CanReadGMSA</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"dot\" style=\"background:#fff;border:2px solid #E74C3C\"></div>Roastable</div>\n", pFile);
     fputs("</div>\n", pFile);
 
     /* ── Edge type filters ─────────────────────────────────────────── */
@@ -370,6 +410,7 @@ KestrelEmitHtml(
     fputs("  <label><input type=\"checkbox\" id=\"f-member\" checked onchange=\"updateFilter()\"> MemberOf</label>\n", pFile);
     fputs("  <label><input type=\"checkbox\" id=\"f-deleg\" checked onchange=\"updateFilter()\"> Delegation</label>\n", pFile);
     fputs("  <label><input type=\"checkbox\" id=\"f-laps\" checked onchange=\"updateFilter()\"> LAPS read</label>\n", pFile);
+    fputs("  <label><input type=\"checkbox\" id=\"f-gmsa\" checked onchange=\"updateFilter()\"> gMSA read</label>\n", pFile);
     fputs("  <label><input type=\"checkbox\" id=\"f-deny\" onchange=\"updateFilter()\"> Show DENY</label>\n", pFile);
     fputs("</div>\n", pFile);
 
@@ -393,7 +434,8 @@ KestrelEmitHtml(
     fputs("  Delegation_Constrained: '#8E44AD',\n", pFile);
     fputs("  Delegation_S4U2Self: '#6C3483',\n", pFile);
     fputs("  Delegation_RBCD: '#C39BD3',\n", pFile);
-    fputs("  CanReadLAPS: '#16A085'\n", pFile);
+    fputs("  CanReadLAPS: '#16A085',\n", pFile);
+    fputs("  CanReadGMSAPassword: '#E67E22'\n", pFile);
     fputs("};\n\n", pFile);
     fputs("const EDGE_SEVERITY = {\n", pFile);
     fputs("  GenericAll: 3, WriteDACL: 3, WriteOwner: 3,\n", pFile);
@@ -401,14 +443,15 @@ KestrelEmitHtml(
     fputs("  WriteProperty: 1, MemberOf: 0,\n", pFile);
     fputs("  Delegation_Unconstrained: 2, Delegation_Constrained: 1,\n", pFile);
     fputs("  Delegation_S4U2Self: 1,\n", pFile);
-    fputs("  Delegation_RBCD: 2, CanReadLAPS: 2\n", pFile);
+    fputs("  Delegation_RBCD: 2, CanReadLAPS: 2, CanReadGMSAPassword: 3\n", pFile);
     fputs("};\n\n", pFile);
-    fputs("let activeFilters = { acl: true, member: true, deleg: true, laps: true, deny: false };\n", pFile);
+    fputs("let activeFilters = { acl: true, member: true, deleg: true, laps: true, gmsa: true, deny: false };\n", pFile);
     fputs("let simulation, svg, linkGroup, nodeGroup;\n\n", pFile);
     fputs("function isEdgeVisible(e) {\n", pFile);
     fputs("  if (e.deny && !activeFilters.deny) return false;\n", pFile);
     fputs("  if (e.type === 'MemberOf') return activeFilters.member;\n", pFile);
     fputs("  if (e.type === 'CanReadLAPS') return activeFilters.laps;\n", pFile);
+    fputs("  if (e.type === 'CanReadGMSAPassword') return activeFilters.gmsa;\n", pFile);
     fputs("  if (e.type.startsWith('Delegation')) return activeFilters.deleg;\n", pFile);
     fputs("  return activeFilters.acl;\n", pFile);
     fputs("}\n\n", pFile);
@@ -417,6 +460,7 @@ KestrelEmitHtml(
     fputs("  activeFilters.member = document.getElementById('f-member').checked;\n", pFile);
     fputs("  activeFilters.deleg  = document.getElementById('f-deleg').checked;\n", pFile);
     fputs("  activeFilters.laps   = document.getElementById('f-laps').checked;\n", pFile);
+    fputs("  activeFilters.gmsa   = document.getElementById('f-gmsa').checked;\n", pFile);
     fputs("  activeFilters.deny   = document.getElementById('f-deny').checked;\n", pFile);
     fputs("  linkGroup.selectAll('line')\n", pFile);
     fputs("    .style('display', d => isEdgeVisible(d) ? null : 'none');\n", pFile);
@@ -434,6 +478,8 @@ KestrelEmitHtml(
     fputs("    <div class='field'><label>STATUS</label><value>${d.enabled ? 'Enabled' : 'DISABLED'}</value></div>\n", pFile);
     fputs("    ${d.highValue ? \"<div class='field'><label>HIGH VALUE TARGET</label></div>\" : ''}\n", pFile);
     fputs("    ${d.unconstrainedDeleg ? \"<div class='field'><label>UNCONSTRAINED DELEGATION</label></div>\" : ''}\n", pFile);
+    fputs("    ${d.kerberoastable ? \"<div class='field'><label>KERBEROASTABLE</label></div>\" : ''}\n", pFile);
+    fputs("    ${d.asrepRoastable ? \"<div class='field'><label>AS-REP ROASTABLE</label></div>\" : ''}\n", pFile);
     fputs("  `;\n", pFile);
     fputs("}\n\n", pFile);
     fputs("function initGraph() {\n", pFile);
@@ -477,8 +523,8 @@ KestrelEmitHtml(
     fputs("    .data(nodes).enter().append('circle')\n", pFile);
     fputs("    .attr('r', d => d.highValue ? 12 : d.class === 'group' ? 9 : 7)\n", pFile);
     fputs("    .attr('fill', d => NODE_COLORS[d.class] || '#95A5A6')\n", pFile);
-    fputs("    .attr('stroke', d => d.highValue ? '#fff' : 'rgba(255,255,255,0.15)')\n", pFile);
-    fputs("    .attr('stroke-width', d => d.highValue ? 2 : 0.5)\n", pFile);
+    fputs("    .attr('stroke', d => d.highValue ? '#fff' : (d.kerberoastable || d.asrepRoastable) ? '#E74C3C' : 'rgba(255,255,255,0.15)')\n", pFile);
+    fputs("    .attr('stroke-width', d => (d.highValue || d.kerberoastable || d.asrepRoastable) ? 2 : 0.5)\n", pFile);
     fputs("    .style('cursor', 'pointer')\n", pFile);
     fputs("    .on('click', (event, d) => { event.stopPropagation(); showNodePanel(d); })\n", pFile);
     fputs("    .on('mouseover', (event, d) => {\n", pFile);
@@ -887,6 +933,71 @@ KestrelGraphAddLapsEdges(
     return S_OK;
 }
 
+_Must_inspect_result_
+static HRESULT
+KestrelGraphAddGmsaEdges(
+    _Inout_  KESTREL_GRAPH            *pGraph,
+    _In_     KESTREL_GMSA_SCAN_RESULT *pGmsaResult)
+{
+    for (DWORD i = 0; i < pGmsaResult->cReaders; i++) {
+        const KESTREL_GMSA_READER *pR = &pGmsaResult->rgReaders[i];
+
+        /* DENY ACEs are recorded by the scan but are not capability edges. */
+        if (pR->bDeny)
+            continue;
+
+        /* Reader (SID) → gMSA. Keying the reader by SID lets it merge with the
+           same principal seen as an ACL trustee or LAPS reader. The gMSA is
+           keyed by its own objectSid; SAM is the label. */
+        DWORD iFrom = KestrelGraphGetOrAddNode(pGraph,
+                pR->wszTrusteeSid, L"", pR->wszTrusteeSid,
+                NODE_CLASS_UNKNOWN, TRUE, TRUE);
+
+        DWORD iTo = KestrelGraphGetOrAddNode(pGraph,
+                pR->wszGmsaSid, pR->wszGmsaDN,
+                pR->wszGmsaSam[0] ? pR->wszGmsaSam : pR->wszGmsaDN,
+                NODE_CLASS_USER, TRUE, TRUE);
+
+        if (iFrom == MAXDWORD || iTo == MAXDWORD)
+            continue;
+
+        HRESULT hr = KestrelGraphAddEdge(pGraph, iFrom, iTo,
+                                         GEDGE_CAN_READ_GMSA_PASSWORD,
+                                         pR->wszGmsaSam, FALSE);
+        if (FAILED(hr)) return hr;
+
+        pGraph->cGmsaEdges++;
+    }
+
+    return S_OK;
+}
+
+static VOID
+KestrelGraphApplyRoast(
+    _Inout_  KESTREL_GRAPH             *pGraph,
+    _In_     KESTREL_ROAST_SCAN_RESULT *pRoastResult)
+{
+    for (DWORD i = 0; i < pRoastResult->cFindings; i++) {
+        const KESTREL_ROAST_FINDING *pF = &pRoastResult->rgFindings[i];
+
+        /* Properties of an existing principal node. Look up by SID without
+           creating (bCreate = FALSE): a roastable account only matters in the
+           graph if it is already reachable via another edge. The standalone
+           console table from KestrelRunRoastScan lists every finding. */
+        DWORD iNode = KestrelGraphGetOrAddNode(pGraph,
+                pF->wszSid, L"", pF->wszSAM,
+                NODE_CLASS_USER, TRUE, FALSE);
+
+        if (iNode == MAXDWORD)
+            continue;
+
+        if (pF->Kind == ROAST_KERBEROASTABLE)
+            pGraph->pNodes[iNode].bKerberoastable = TRUE;
+        else if (pF->Kind == ROAST_ASREPROASTABLE)
+            pGraph->pNodes[iNode].bASREPRoastable = TRUE;
+    }
+}
+
 VOID
 KestrelFreeGraph(
     _In_opt_ _Post_ptr_invalid_ KESTREL_GRAPH *pGraph)
@@ -970,7 +1081,7 @@ static const char *g_rgszEdgeType[] = {
     "ExtendedRight", "WriteProperty",
     "MemberOf",
     "Delegation_Unconstrained", "Delegation_Constrained", "Delegation_S4U2Self",
-    "Delegation_RBCD", "CanReadLAPS"
+    "Delegation_RBCD", "CanReadLAPS", "CanReadGMSAPassword"
 };
 
 _Must_inspect_result_
@@ -997,11 +1108,13 @@ KestrelEmitGraphJson(
         KestrelEmitJsonStringW(pFile, pN->wszSid);
         fputs("\", \"label\": \"", pFile);
         KestrelEmitJsonStringW(pFile, pN->wszLabel);
-        fprintf(pFile, "\", \"class\": \"%s\", \"enabled\": %s, \"highValue\": %s, \"unconstrainedDeleg\": %s }%s\n",
+        fprintf(pFile, "\", \"class\": \"%s\", \"enabled\": %s, \"highValue\": %s, \"unconstrainedDeleg\": %s, \"kerberoastable\": %s, \"asrepRoastable\": %s }%s\n",
             pszClass,
             pN->bEnabled            ? "true" : "false",
             pN->bHighValue          ? "true" : "false",
             pN->bUnconstrainedDeleg ? "true" : "false",
+            pN->bKerberoastable     ? "true" : "false",
+            pN->bASREPRoastable     ? "true" : "false",
             (i + 1 < pGraph->cNodes) ? "," : "");
     }
     fputs("  ],\n", pFile);
@@ -1051,6 +1164,7 @@ KestrelEmitYaml(
     fprintf(pFile, "  memberEdges: %lu\n", pGraph->cMemberEdges);
     fprintf(pFile, "  delegEdges: %lu\n",  pGraph->cDelegEdges);
     fprintf(pFile, "  lapsEdges: %lu\n",   pGraph->cLapsEdges);
+    fprintf(pFile, "  gmsaEdges: %lu\n",   pGraph->cGmsaEdges);
 
     /* String scalars are double-quoted; YAML 1.2 accepts JSON-style escapes,
        so the same escaper is reused. class/type are known-safe bare tokens. */
@@ -1073,6 +1187,10 @@ KestrelEmitYaml(
         fprintf(pFile, "    highValue: %s\n", pN->bHighValue ? "true" : "false");
         fprintf(pFile, "    unconstrainedDeleg: %s\n",
             pN->bUnconstrainedDeleg ? "true" : "false");
+        fprintf(pFile, "    kerberoastable: %s\n",
+            pN->bKerberoastable ? "true" : "false");
+        fprintf(pFile, "    asrepRoastable: %s\n",
+            pN->bASREPRoastable ? "true" : "false");
     }
 
     fputs("edges:\n", pFile);

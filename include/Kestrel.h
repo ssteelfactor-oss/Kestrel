@@ -233,6 +233,8 @@ typedef struct _KESTREL_GRAPH_NODE {
     BOOL                bEnabled;
     BOOL                bHighValue;
     BOOL                bUnconstrainedDeleg;
+    BOOL                bKerberoastable;
+    BOOL                bASREPRoastable;
 } KESTREL_GRAPH_NODE;
 
 typedef struct _KESTREL_GRAPH_EDGE {
@@ -260,6 +262,7 @@ typedef struct _KESTREL_GRAPH {
     DWORD                     cMemberEdges;
     DWORD                     cDelegEdges;
     DWORD                     cLapsEdges;
+    DWORD                     cGmsaEdges;
 } KESTREL_GRAPH;
 
 typedef enum _KESTREL_REPORT_FORMAT {
@@ -355,6 +358,7 @@ typedef struct _KESTREL_TRUST_SCAN_RESULT {
 typedef struct _KESTREL_GMSA_READER {
     WCHAR wszGmsaDN[512];       /* DN of the gMSA object                       */
     WCHAR wszGmsaSam[128];      /* sAMAccountName of the gMSA                  */
+    WCHAR wszGmsaSid[128];      /* objectSid of the gMSA (graph node key)     */
     WCHAR wszTrusteeSid[128];   /* SID of the principal in the membership DACL */
     BOOL  bDeny;                /* TRUE = explicit DENY ACE                    */
     BOOL  bInherited;           /* TRUE = inherited ACE                        */
@@ -429,6 +433,8 @@ _Must_inspect_result_ HRESULT KestrelBuildGraph(
     _In_opt_ KESTREL_GROUP_SCAN_RESULT *pGroupResult,
     _In_opt_ KESTREL_DELEG_SCAN_RESULT *pDelegResult,
     _In_opt_ KESTREL_LAPS_SCAN_RESULT  *pLapsResult,
+    _In_opt_ KESTREL_GMSA_SCAN_RESULT  *pGMSAResult,
+    _In_opt_ KESTREL_ROAST_SCAN_RESULT *pRoastResult,
     _Outptr_ KESTREL_GRAPH            **ppGraph);
 
 _Must_inspect_result_
