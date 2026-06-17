@@ -18,6 +18,7 @@
  *   --roast        Kerberoastable + AS-REP Roastable
  *   --trust        Domain/forest trust posture
  *   --gmsa         gMSA password reader enumeration
+ *   --adcs         ADCS certificate-template / CA audit (ESC1-5/9)
  *
  * Output:
  *   --report <path>  Generate report (.html / .json / .yaml)
@@ -64,7 +65,8 @@ KestrelPrintHelp(VOID)
         L"  --from <prin>  Paths FROM a principal (SID/name); implies --paths\n"
         L"  --roast        Kerberoastable + AS-REP Roastable detection\n"
         L"  --trust        Domain/forest trust posture audit\n"
-        L"  --gmsa         gMSA password reader enumeration\n\n"
+        L"  --gmsa         gMSA password reader enumeration\n"
+        L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n\n"
         L"OPTIONS:\n"
@@ -75,7 +77,7 @@ KestrelPrintHelp(VOID)
         L"  Kestrel.exe\n"
         L"  Kestrel.exe --report C:\\out\\report.html\n"
         L"  Kestrel.exe --acl --groups --report C:\\out\\report.html\n"
-        L"  Kestrel.exe --trust --gmsa --verbose\n"
+        L"  Kestrel.exe --trust --gmsa --adcs --verbose\n"
         L"  Kestrel.exe --report %%USERPROFILE%%\\Desktop\\report.html\n\n"
     );
 }
@@ -99,6 +101,7 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunRoast      = TRUE;
     pCfg->bRunTrust      = TRUE;
     pCfg->bRunGMSA       = TRUE;
+    pCfg->bRunADCS       = TRUE;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -223,6 +226,11 @@ KestrelParseArgs(
             pCfg->bExplicitModules = TRUE;
             continue;
         }
+        if (_wcsicmp(arg, L"--adcs") == 0) {
+            pCfg->bRunADCS = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
 
         /* ── Unknown argument ────────────────────────────────────── */
         wprintf(L"[!] Unknown argument: %s\n", arg);
@@ -273,6 +281,7 @@ int wmain(int argc, wchar_t *argv[])
     KESTREL_ROAST_SCAN_RESULT     *pRoast  = 0;
     KESTREL_TRUST_SCAN_RESULT     *pTrust  = 0;
     KESTREL_GMSA_SCAN_RESULT      *pGMSA   = 0;
+    KESTREL_ADCS_SCAN_RESULT      *pADCS   = 0;
     VARIANT varDomain, varConfig;
     VariantInit(&varDomain);
     VariantInit(&varConfig);
@@ -393,7 +402,7 @@ int wmain(int argc, wchar_t *argv[])
             pTrust ? pTrust->cRisky : 0);
     }
 
-    /* ── v0.7.1: gMSA password reader enumeration ──────────────────── */
+    /* ── v0.7: gMSA password reader enumeration ──────────────────── */
     if (cfg.bRunGMSA) {
         wprintf(L"\n═══ Kestrel v0.7 — gMSA Password Reader Scan ═══\n\n");
         hr = KestrelRunGMSAScan(wszDomainNC, &pGMSA);
@@ -404,9 +413,20 @@ int wmain(int argc, wchar_t *argv[])
             pGMSA ? pGMSA->cReaders : 0);
     }
 
+    /* ── v0.7: AD CS posture audit (ESC1-5/9) ────────────────────── */
+    if (cfg.bRunADCS) {
+        wprintf(L"\n═══ Kestrel v0.7 — AD CS Posture (ESC1-5/9) ═══\n\n");
+        hr = KestrelRunADCSScan(wszConfigNC, &pADCS);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunADCSScan failed: 0x%08X\n", hr);
+        KTRACE(L"ADCS scan complete — templates: %lu, findings: %lu",
+            pADCS ? pADCS->cTemplates : 0,
+            pADCS ? pADCS->cVulnerable : 0);
+    }
+
     /* ── v0.4: build graph + report (HTML / JSON / YAML by extension) ── */
     if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation ||
-        cfg.bRunLAPS || cfg.bRunPaths) {
+        cfg.bRunLAPS || cfg.bRunPaths || cfg.bRunGMSA || cfg.bRunRoast) {
         hr = KestrelBuildGraph(pACL, pGroup, pDeleg, pLaps, pGMSA, pRoast, &pGraph);
         if (FAILED(hr)) {
             wprintf(L"[!] KestrelBuildGraph failed: 0x%08X\n", hr);
@@ -448,6 +468,7 @@ Cleanup:
     KestrelFreeRoastScanResult(pRoast);
     KestrelFreeTrustScanResult(pTrust);
     KestrelFreeGMSAScanResult(pGMSA);
+    KestrelFreeADCSScanResult(pADCS);
     KestrelFreeGraph(pGraph);
     CoUninitialize();
     return HRESULT_CODE(hr);

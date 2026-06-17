@@ -79,7 +79,7 @@ static VOID _TrustClassify(_Inout_ KESTREL_TRUST_FINDING *pF)
 
     /* Within-forest excluded from the SID-filter check — otherwise every
      * intra-forest trust false-positives (the forest is the boundary). */
-    if (bInbound && !pF->bWithinForest && !pF->bSidFiltering)
+    if (bInbound && !pF->bWithinForest && !pF->bForestTransitive && !pF->bSidFiltering)
         _TrustNote(pF, L"no SID filtering (sIDHistory surface)");
     if (pF->bTreatAsExternal)
         _TrustNote(pF, L"forest trust treated as external");

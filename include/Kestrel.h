@@ -12,6 +12,7 @@
  *   KestrelRoast.c  — v0.6  Kerberoastable + AS-REP Roastable detection
  *   KestrelTrust.c  — v0.7  Domain trust posture audit
  *   KestrelGMSA.c   — v0.7  gMSA password reader enumeration
+ *   KestrelADCS.c   — v0.7  ADCS certificate-template / CA audit (ESC1-5/9)
  */
 
 #pragma once
@@ -69,6 +70,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunRoast;     /* v0.6 Kerberoast / AS-REP     */
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
+    BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
 
     /* Output */
     WCHAR wszReportPath[512];
@@ -373,6 +375,34 @@ typedef struct _KESTREL_GMSA_SCAN_RESULT {
 } KESTREL_GMSA_SCAN_RESULT;
 
 /* ════════════════════════════════════════════════════════════════════════════
+ * Shared types — KestrelADCS.c (v0.7)
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+typedef struct _KESTREL_ADCS_FINDING {
+    WCHAR  wszName[256];         /* template cn or CA name              */
+    WCHAR  wszDisplayName[256];  /* displayName                         */
+    WCHAR  wszKind[16];          /* "template" | "ca"                   */
+    BOOL   bESC1;                /* enrollee supplies subject + auth EKU */
+    BOOL   bESC2;                /* Any Purpose / no EKU                */
+    BOOL   bESC3;                /* Certificate Request Agent EKU       */
+    BOOL   bESC4;                /* template object writable by low-priv */
+    BOOL   bESC5;                /* CA object writable by low-priv      */
+    BOOL   bESC9;                /* NO_SECURITY_EXTENSION on auth tmpl   */
+    BOOL   bPublished;           /* template enabled on >= 1 CA         */
+    BOOL   bLowPrivEnroll;       /* broad principal can enroll          */
+    WCHAR  wszLowPrivSid[128];   /* triggering broad principal SID      */
+    WCHAR  wszRisk[512];         /* joined human notes                  */
+} KESTREL_ADCS_FINDING;
+
+typedef struct _KESTREL_ADCS_SCAN_RESULT {
+    KESTREL_ADCS_FINDING *rgFindings;
+    DWORD                 cFindings;
+    DWORD                 cCapacity;
+    DWORD                 cTemplates;     /* templates examined         */
+    DWORD                 cVulnerable;    /* findings with >= 1 ESC      */
+} KESTREL_ADCS_SCAN_RESULT;
+
+/* ════════════════════════════════════════════════════════════════════════════
  * adws_scan.c — v0.1
  * ════════════════════════════════════════════════════════════════════════════ */
 
@@ -533,3 +563,15 @@ HRESULT KestrelRunGMSAScan(
 
 VOID KestrelFreeGMSAScanResult(
     _In_opt_ _Post_ptr_invalid_ KESTREL_GMSA_SCAN_RESULT *pResult);
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * KestrelADCS.c — v0.7
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+_Must_inspect_result_
+HRESULT KestrelRunADCSScan(
+    _In_z_   LPCWSTR                    pwszConfigNC,
+    _Outptr_ KESTREL_ADCS_SCAN_RESULT **ppResult);
+
+VOID KestrelFreeADCSScanResult(
+    _In_opt_ _Post_ptr_invalid_ KESTREL_ADCS_SCAN_RESULT *pResult);
