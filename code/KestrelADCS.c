@@ -217,82 +217,121 @@ static PSECURITY_DESCRIPTOR _AdcsGetSd(_In_ IDirectorySearch *pSearch,
     return pSD;
 }
 
-/* Walk the DACL: set bEnroll if a broad principal holds the Certificate-Enrollment
-   control-access right (or GenericAll/all-extended), bWrite if a broad principal
-   holds a write-class right. Captures the first triggering enroll SID. */
-static void _AdcsWalkDacl(_In_ PSECURITY_DESCRIPTOR pSD,
-                          _Out_ BOOL *pbEnroll, _Out_ BOOL *pbWrite,
-                          _Out_writes_z_(cch) LPWSTR pwszTrigger, size_t cch)
+/* Verdict from an owner + DACL inspection. */
+typedef struct _ADCS_DACL_VERDICT {
+    BOOL  bEnroll;
+    BOOL  bWrite;
+    WCHAR wszEnrollSid[128];    /* broad principal that can enroll          */
+    WCHAR wszWriteSid[128];     /* broad principal with a write-class right */
+    WCHAR wszWriteRight[32];    /* name of that write right                 */
+} ADCS_DACL_VERDICT;
+
+/* Strongest write-class right in mask, or NULL. A property-scoped WriteProperty
+   (object ACE carrying an ObjectType GUID) is NOT counted — ESC4 needs control
+   over the object or ALL of its properties, not a single attribute. */
+static const wchar_t *_AdcsWriteRightName(_In_ ACCESS_MASK m, _In_opt_ const GUID *pObjType)
+{
+    if (m & ADS_RIGHT_GENERIC_ALL)                  return L"GenericAll";
+    if (m & ADS_RIGHT_WRITE_OWNER)                  return L"WriteOwner";
+    if (m & ADS_RIGHT_WRITE_DAC)                    return L"WriteDacl";
+    if (m & ADS_RIGHT_GENERIC_WRITE)                return L"GenericWrite";
+    if ((m & ADS_RIGHT_DS_WRITE_PROP) && !pObjType) return L"WriteAllProps";
+    return NULL;
+}
+
+static void _AdcsCaptureEnroll(_Inout_ ADCS_DACL_VERDICT *pV, _In_ PSID pSid)
+{
+    LPWSTR s = NULL;
+    if (pV->bEnroll)
+        return;
+    pV->bEnroll = TRUE;
+    if (ConvertSidToStringSidW(pSid, &s) && s) {
+        StringCchCopyW(pV->wszEnrollSid, ARRAYSIZE(pV->wszEnrollSid), s);
+        LocalFree(s);
+    }
+}
+
+static void _AdcsCaptureWrite(_Inout_ ADCS_DACL_VERDICT *pV, _In_ PSID pSid, _In_z_ LPCWSTR pwszRight)
+{
+    LPWSTR s = NULL;
+    pV->bWrite = TRUE;
+    if (pV->wszWriteSid[0])
+        return;   /* keep the first (DACL rights take precedence over owner) */
+    if (ConvertSidToStringSidW(pSid, &s) && s) {
+        StringCchCopyW(pV->wszWriteSid, ARRAYSIZE(pV->wszWriteSid), s);
+        LocalFree(s);
+    }
+    StringCchCopyW(pV->wszWriteRight, ARRAYSIZE(pV->wszWriteRight), pwszRight);
+}
+
+/* Walk owner + DACL. Sets enroll when a broad principal holds Certificate-Enrollment
+   (or GenericAll); sets write when a broad principal owns the object or holds a
+   write-class right. Property-scoped WriteProperty is excluded (see above). */
+static void _AdcsWalkDacl(_In_ PSECURITY_DESCRIPTOR pSD, _Out_ ADCS_DACL_VERDICT *pV)
 {
     BOOL bPresent = FALSE, bDefaulted = FALSE;
     PACL pDacl = NULL;
+    PSID pOwner = NULL;
 
-    *pbEnroll = FALSE; *pbWrite = FALSE; pwszTrigger[0] = L'\0';
+    ZeroMemory(pV, sizeof(*pV));
 
-    if (!GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDefaulted) ||
-        !bPresent || !pDacl)
-        return;
+    if (GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDefaulted) &&
+        bPresent && pDacl) {
+        for (WORD i = 0; i < pDacl->AceCount; i++) {
+            PVOID          pAceRaw  = NULL;
+            PACE_HEADER    pHdr;
+            ACCESS_MASK    mask     = 0;
+            PSID           pSid     = NULL;
+            const GUID    *pObjType = NULL;
+            const wchar_t *pwszWrite;
 
-    for (WORD i = 0; i < pDacl->AceCount; i++) {
-        PVOID       pAceRaw = NULL;
-        PACE_HEADER pHdr;
-        ACCESS_MASK mask    = 0;
-        PSID        pSid    = NULL;
-        const GUID *pObjType = NULL;
+            if (!GetAce(pDacl, i, &pAceRaw))
+                continue;
+            pHdr = (PACE_HEADER)pAceRaw;
 
-        if (!GetAce(pDacl, i, &pAceRaw))
-            continue;
-        pHdr = (PACE_HEADER)pAceRaw;
-
-        if (pHdr->AceType == ACCESS_ALLOWED_ACE_TYPE) {
-            ACCESS_ALLOWED_ACE *p = (ACCESS_ALLOWED_ACE *)pAceRaw;
-            mask = p->Mask;
-            pSid = (PSID)&p->SidStart;
-        } else if (pHdr->AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE) {
-            ACCESS_ALLOWED_OBJECT_ACE *p = (ACCESS_ALLOWED_OBJECT_ACE *)pAceRaw;
-            BYTE *pAfter = (BYTE *)&p->ObjectType;
-            mask = p->Mask;
-            if (p->Flags & ACE_OBJECT_TYPE_PRESENT) {
-                pObjType = &p->ObjectType;
-                pAfter  += sizeof(GUID);
-            }
-            if (p->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT)
-                pAfter  += sizeof(GUID);
-            pSid = (PSID)pAfter;
-        } else {
-            continue;   /* DENY / AUDIT — not a capability grant */
-        }
-
-        if (!_AdcsSidIsBroad(pSid))
-            continue;
-
-        if (mask & ADS_RIGHT_GENERIC_ALL) {
-            if (!*pbEnroll) {
-                *pbEnroll = TRUE;
-                LPWSTR s = NULL;
-                if (ConvertSidToStringSidW(pSid, &s) && s) {
-                    StringCchCopyW(pwszTrigger, cch, s); LocalFree(s);
+            if (pHdr->AceType == ACCESS_ALLOWED_ACE_TYPE) {
+                ACCESS_ALLOWED_ACE *p = (ACCESS_ALLOWED_ACE *)pAceRaw;
+                mask = p->Mask;
+                pSid = (PSID)&p->SidStart;
+            } else if (pHdr->AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE) {
+                ACCESS_ALLOWED_OBJECT_ACE *p = (ACCESS_ALLOWED_OBJECT_ACE *)pAceRaw;
+                BYTE *pAfter = (BYTE *)&p->ObjectType;
+                mask = p->Mask;
+                if (p->Flags & ACE_OBJECT_TYPE_PRESENT) {
+                    pObjType = &p->ObjectType;
+                    pAfter  += sizeof(GUID);
                 }
+                if (p->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT)
+                    pAfter  += sizeof(GUID);
+                pSid = (PSID)pAfter;
+            } else {
+                continue;   /* DENY / AUDIT — not a capability grant */
             }
-            *pbWrite = TRUE;
-        }
-        if (mask & (ADS_RIGHT_WRITE_DAC | ADS_RIGHT_WRITE_OWNER |
-                    ADS_RIGHT_GENERIC_WRITE | ADS_RIGHT_DS_WRITE_PROP))
-            *pbWrite = TRUE;
-        if (mask & ADS_RIGHT_DS_CONTROL_ACCESS) {
-            if (!pObjType ||
-                IsEqualGUID(pObjType, &GUID_ENROLL) ||
-                IsEqualGUID(pObjType, &GUID_AUTOENROLL)) {
-                if (!*pbEnroll) {
-                    *pbEnroll = TRUE;
-                    LPWSTR s = NULL;
-                    if (ConvertSidToStringSidW(pSid, &s) && s) {
-                        StringCchCopyW(pwszTrigger, cch, s); LocalFree(s);
-                    }
-                }
+
+            if (!_AdcsSidIsBroad(pSid))
+                continue;
+
+            /* enroll */
+            if (mask & ADS_RIGHT_GENERIC_ALL)
+                _AdcsCaptureEnroll(pV, pSid);
+            if (mask & ADS_RIGHT_DS_CONTROL_ACCESS) {
+                if (!pObjType ||
+                    IsEqualGUID(pObjType, &GUID_ENROLL) ||
+                    IsEqualGUID(pObjType, &GUID_AUTOENROLL))
+                    _AdcsCaptureEnroll(pV, pSid);
             }
+
+            /* write — property-scoped WriteProperty deliberately not counted */
+            pwszWrite = _AdcsWriteRightName(mask, pObjType);
+            if (pwszWrite)
+                _AdcsCaptureWrite(pV, pSid, pwszWrite);
         }
     }
+
+    /* Owner can always rewrite the DACL — ESC4 if it is a broad principal. */
+    if (GetSecurityDescriptorOwner(pSD, &pOwner, &bDefaulted) &&
+        pOwner && _AdcsSidIsBroad(pOwner))
+        _AdcsCaptureWrite(pV, pOwner, L"Owner");
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -347,8 +386,7 @@ static HRESULT _AdcsScanCAs(_In_ IDirectorySearch *pSearch,
         KESTREL_ADCS_FINDING f;
         ADS_SEARCH_COLUMN    col;
         PSECURITY_DESCRIPTOR pSD;
-        BOOL bEnroll = FALSE, bWrite = FALSE;
-        WCHAR wszTrig[128] = { 0 };
+        ADCS_DACL_VERDICT    v;
 
         hr = pSearch->lpVtbl->GetNextRow(pSearch, hRow);
         if (hr == S_ADS_NOMORE_ROWS) { hr = S_OK; break; }
@@ -370,15 +408,21 @@ static HRESULT _AdcsScanCAs(_In_ IDirectorySearch *pSearch,
         }
 
         /* ESC5 — broad write on the CA object */
+        ZeroMemory(&v, sizeof(v));
         pSD = _AdcsGetSd(pSearch, hRow);
         if (pSD) {
-            _AdcsWalkDacl(pSD, &bEnroll, &bWrite, wszTrig, ARRAYSIZE(wszTrig));
+            _AdcsWalkDacl(pSD, &v);
             HeapFree(GetProcessHeap(), 0, pSD);
         }
-        if (bWrite) {
+        if (v.bWrite) {
+            WCHAR wszN[320];
             f.bESC5 = TRUE;
-            StringCchCopyW(f.wszLowPrivSid, ARRAYSIZE(f.wszLowPrivSid), wszTrig);
-            _AdcsNote(&f, L"ESC5: CA object writable by broad principal");
+            StringCchCopyW(f.wszWriteSid,   ARRAYSIZE(f.wszWriteSid),   v.wszWriteSid);
+            StringCchCopyW(f.wszWriteRight, ARRAYSIZE(f.wszWriteRight), v.wszWriteRight);
+            StringCchPrintfW(wszN, ARRAYSIZE(wszN),
+                L"ESC5: CA object writable by %s (%s)",
+                v.wszWriteSid[0] ? v.wszWriteSid : L"?", v.wszWriteRight);
+            _AdcsNote(&f, wszN);
             pResult->cVulnerable++;
             hr = _AdcsAppend(pResult, &f);
             if (FAILED(hr)) break;
@@ -412,9 +456,8 @@ static HRESULT _AdcsScanTemplates(_In_ IDirectorySearch *pSearch,
         PSECURITY_DESCRIPTOR pSD;
         DWORD dwNameFlag = 0, dwEnrollFlag = 0, dwRaSig = 0;
         BOOL  bAuth = FALSE, bAny = FALSE, bAgent = FALSE;
-        BOOL  bEnroll = FALSE, bWrite = FALSE;
         BOOL  bApproval, bAnyEsc = FALSE;
-        WCHAR wszTrig[128] = { 0 };
+        ADCS_DACL_VERDICT v;
 
         hr = pSearch->lpVtbl->GetNextRow(pSearch, hRow);
         if (hr == S_ADS_NOMORE_ROWS) { hr = S_OK; break; }
@@ -432,42 +475,49 @@ static HRESULT _AdcsScanTemplates(_In_ IDirectorySearch *pSearch,
         _AdcsColInt(pSearch, hRow, (LPWSTR)L"msPKI-RA-Signature",          &dwRaSig);
         _AdcsClassifyEku(pSearch, hRow, &bAuth, &bAny, &bAgent);
 
+        ZeroMemory(&v, sizeof(v));
         pSD = _AdcsGetSd(pSearch, hRow);
         if (pSD) {
-            _AdcsWalkDacl(pSD, &bEnroll, &bWrite, wszTrig, ARRAYSIZE(wszTrig));
+            _AdcsWalkDacl(pSD, &v);
             HeapFree(GetProcessHeap(), 0, pSD);
         }
 
         bApproval        = (dwEnrollFlag & CT_FLAG_PEND_ALL_REQUESTS) != 0;
         f.bPublished     = _PubHas(pPub, f.wszName);
-        f.bLowPrivEnroll = bEnroll;
-        if (bEnroll)
-            StringCchCopyW(f.wszLowPrivSid, ARRAYSIZE(f.wszLowPrivSid), wszTrig);
+        f.bLowPrivEnroll = v.bEnroll;
+        if (v.bEnroll)
+            StringCchCopyW(f.wszLowPrivSid, ARRAYSIZE(f.wszLowPrivSid), v.wszEnrollSid);
 
         /* ESC1 — requester names the subject (incl. SAN) on an auth template,
                   enrollable by a broad principal, no approval, no co-sign. */
         if ((dwNameFlag & CT_FLAG_ENROLLEE_SUPPLIES_SUBJECT) &&
-            bAuth && bEnroll && !bApproval && dwRaSig == 0) {
+            bAuth && v.bEnroll && !bApproval && dwRaSig == 0) {
             f.bESC1 = TRUE; bAnyEsc = TRUE;
             _AdcsNote(&f, L"ESC1: enrollee-supplies-subject + auth EKU + low-priv enroll");
         }
 
         /* ESC2 — Any-Purpose / no EKU, broad enroll, no approval/co-sign. */
-        if (bAny && bEnroll && !bApproval && dwRaSig == 0) {
+        if (bAny && v.bEnroll && !bApproval && dwRaSig == 0) {
             f.bESC2 = TRUE; bAnyEsc = TRUE;
             _AdcsNote(&f, L"ESC2: Any-Purpose (or no) EKU + low-priv enroll");
         }
 
         /* ESC3 — Certificate-Request-Agent template enrollable by broad principal. */
-        if (bAgent && bEnroll) {
+        if (bAgent && v.bEnroll) {
             f.bESC3 = TRUE; bAnyEsc = TRUE;
             _AdcsNote(&f, L"ESC3: enrollment-agent EKU + low-priv enroll");
         }
 
         /* ESC4 — template object writable by a broad principal. */
-        if (bWrite) {
+        if (v.bWrite) {
+            WCHAR wszN[320];
             f.bESC4 = TRUE; bAnyEsc = TRUE;
-            _AdcsNote(&f, L"ESC4: template writable by broad principal");
+            StringCchCopyW(f.wszWriteSid,   ARRAYSIZE(f.wszWriteSid),   v.wszWriteSid);
+            StringCchCopyW(f.wszWriteRight, ARRAYSIZE(f.wszWriteRight), v.wszWriteRight);
+            StringCchPrintfW(wszN, ARRAYSIZE(wszN),
+                L"ESC4: template writable by %s (%s)",
+                v.wszWriteSid[0] ? v.wszWriteSid : L"?", v.wszWriteRight);
+            _AdcsNote(&f, wszN);
         }
 
         /* ESC9 — security extension suppressed on an authentication template. */

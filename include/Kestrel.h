@@ -390,7 +390,9 @@ typedef struct _KESTREL_ADCS_FINDING {
     BOOL   bESC9;                /* NO_SECURITY_EXTENSION on auth tmpl   */
     BOOL   bPublished;           /* template enabled on >= 1 CA         */
     BOOL   bLowPrivEnroll;       /* broad principal can enroll          */
-    WCHAR  wszLowPrivSid[128];   /* triggering broad principal SID      */
+    WCHAR  wszLowPrivSid[128];   /* triggering broad enroll principal   */
+    WCHAR  wszWriteSid[128];     /* triggering broad write principal    */
+    WCHAR  wszWriteRight[32];    /* the write right (ESC4/ESC5)         */
     WCHAR  wszRisk[512];         /* joined human notes                  */
 } KESTREL_ADCS_FINDING;
 
