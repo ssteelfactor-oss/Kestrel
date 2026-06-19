@@ -19,6 +19,7 @@
  *   --trust        Domain/forest trust posture
  *   --gmsa         gMSA password reader enumeration
  *   --adcs         ADCS certificate-template / CA audit (ESC1-5/9)
+ *   --gpp          GPP password reader enumeration (ESC1-5)
  *
  * Output:
  *   --report <path>  Generate report (.html / .json / .yaml)
@@ -66,7 +67,8 @@ KestrelPrintHelp(VOID)
         L"  --roast        Kerberoastable + AS-REP Roastable detection\n"
         L"  --trust        Domain/forest trust posture audit\n"
         L"  --gmsa         gMSA password reader enumeration\n"
-        L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n\n"
+        L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
+        L"  --gpp          GPP password reader enumeration (ESC1-5)\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n\n"
         L"OPTIONS:\n"
@@ -102,6 +104,7 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunTrust      = TRUE;
     pCfg->bRunGMSA       = TRUE;
     pCfg->bRunADCS       = TRUE;
+    pCfg->bRunGPP        = TRUE;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -231,6 +234,11 @@ KestrelParseArgs(
             pCfg->bExplicitModules = TRUE;
             continue;
         }
+		if (_wcsicmp(arg, L"--gpp") == 0) {
+			pCfg->bRunGPP = TRUE;
+			pCfg->bExplicitModules = TRUE;
+			continue;
+		}
 
         /* ── Unknown argument ────────────────────────────────────── */
         wprintf(L"[!] Unknown argument: %s\n", arg);
@@ -282,9 +290,10 @@ int wmain(int argc, wchar_t *argv[])
     KESTREL_TRUST_SCAN_RESULT     *pTrust  = 0;
     KESTREL_GMSA_SCAN_RESULT      *pGMSA   = 0;
     KESTREL_ADCS_SCAN_RESULT      *pADCS   = 0;
-    VARIANT varDomain, varConfig;
-    VariantInit(&varDomain);
-    VariantInit(&varConfig);
+    KESTREL_GPP_SCAN_RESULT       * pGPP   = 0;
+    VARIANT varDomain, varConfig = { 0 };
+    VariantInit( & varDomain );
+    VariantInit( & varConfig );
 
     /* ── Resolve rootDSE ──────────────────────────────────────────── */
     KTRACE(L"Connecting to LDAP://rootDSE...");
@@ -402,16 +411,17 @@ int wmain(int argc, wchar_t *argv[])
             pTrust ? pTrust->cRisky : 0);
     }
 
-    /* ── v0.7: gMSA password reader enumeration ──────────────────── */
-    if (cfg.bRunGMSA) {
-        wprintf(L"\n═══ Kestrel v0.7 — gMSA Password Reader Scan ═══\n\n");
-        hr = KestrelRunGMSAScan(wszDomainNC, &pGMSA);
+    if (cfg.bRunGPP) {
+        wprintf(L"\n═══ Kestrel v0.7 — GPP cpassword (SYSVOL) ═══\n\n");
+        hr = KestrelRunGPPScan(wszDomainNC, &pGPP);
         if (FAILED(hr))
-            wprintf(L"[!] KestrelRunGMSAScan failed: 0x%08X\n", hr);
-        KTRACE(L"gMSA scan complete — objects: %lu, readers: %lu",
-            pGMSA ? pGMSA->cGmsaScanned : 0,
-            pGMSA ? pGMSA->cReaders : 0);
+            wprintf(L"[!] KestrelRunGPPScan failed: 0x%08X\n", hr);
+        KTRACE(L"GPP scan complete — files: %lu, findings: %lu",
+            pGPP ? pGPP->cFilesScanned : 0,
+            pGPP ? pGPP->cFindings : 0);
     }
+
+   
 
     /* ── v0.7: AD CS posture audit (ESC1-5/9) ────────────────────── */
     if (cfg.bRunADCS) {
@@ -422,6 +432,17 @@ int wmain(int argc, wchar_t *argv[])
         KTRACE(L"ADCS scan complete — templates: %lu, findings: %lu",
             pADCS ? pADCS->cTemplates : 0,
             pADCS ? pADCS->cVulnerable : 0);
+    }
+
+    /* ── v0.7: gMSA password reader enumeration ──────────────────── */
+    if (cfg.bRunGMSA) {
+        wprintf(L"\n═══ Kestrel v0.7 — gMSA Password Reader Scan ═══\n\n");
+        hr = KestrelRunGMSAScan(wszDomainNC, &pGMSA);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunGMSAScan failed: 0x%08X\n", hr);
+        KTRACE(L"gMSA scan complete — objects: %lu, readers: %lu",
+            pGMSA ? pGMSA->cGmsaScanned : 0,
+            pGMSA ? pGMSA->cReaders : 0);
     }
 
     /* ── v0.4: build graph + report (HTML / JSON / YAML by extension) ── */

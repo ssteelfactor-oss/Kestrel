@@ -13,6 +13,7 @@
  *   KestrelTrust.c  — v0.7  Domain trust posture audit
  *   KestrelGMSA.c   — v0.7  gMSA password reader enumeration
  *   KestrelADCS.c   — v0.7  ADCS certificate-template / CA audit (ESC1-5/9)
+ *   KestrelGPP.c    — v0.7  GPP cpassword recovery (SYSVOL/SMB, MS14-025)
  */
 
 #pragma once
@@ -71,6 +72,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
+    BOOL bRunGPP;       /* v0.7 GPP cpassword (SYSVOL)   */
 
     /* Output */
     WCHAR wszReportPath[512];
@@ -405,6 +407,26 @@ typedef struct _KESTREL_ADCS_SCAN_RESULT {
 } KESTREL_ADCS_SCAN_RESULT;
 
 /* ════════════════════════════════════════════════════════════════════════════
+ * Shared types — KestrelGPP.c (v0.7)
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+typedef struct _KESTREL_GPP_FINDING {
+    WCHAR  wszGpoGuid[64];       /* {GUID} policy folder                */
+    WCHAR  wszType[32];          /* Groups | Services | ScheduledTasks… */
+    WCHAR  wszFile[128];         /* XML file name                       */
+    WCHAR  wszAccount[128];      /* userName/accountName/runAs if found */
+    WCHAR  wszPassword[256];     /* decrypted plaintext                 */
+    BOOL   bDecrypted;
+} KESTREL_GPP_FINDING;
+
+typedef struct _KESTREL_GPP_SCAN_RESULT {
+    KESTREL_GPP_FINDING *rgFindings;
+    DWORD                cFindings;
+    DWORD                cCapacity;
+    DWORD                cFilesScanned;
+} KESTREL_GPP_SCAN_RESULT;
+
+/* ════════════════════════════════════════════════════════════════════════════
  * adws_scan.c — v0.1
  * ════════════════════════════════════════════════════════════════════════════ */
 
@@ -577,3 +599,15 @@ HRESULT KestrelRunADCSScan(
 
 VOID KestrelFreeADCSScanResult(
     _In_opt_ _Post_ptr_invalid_ KESTREL_ADCS_SCAN_RESULT *pResult);
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * KestrelGPP.c — v0.7
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+_Must_inspect_result_
+HRESULT KestrelRunGPPScan(
+    _In_z_   LPCWSTR                   pwszDomainNC,
+    _Outptr_ KESTREL_GPP_SCAN_RESULT **ppResult);
+
+VOID KestrelFreeGPPScanResult(
+    _In_opt_ _Post_ptr_invalid_ KESTREL_GPP_SCAN_RESULT *pResult);
