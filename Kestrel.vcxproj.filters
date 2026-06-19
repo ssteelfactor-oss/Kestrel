@@ -48,7 +48,7 @@
     <ClCompile Include="code\KestrelADCS.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
-    <ClCompile Include="code\KestrelGPP .c">
+    <ClCompile Include="code\KestrelGPP.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
   </ItemGroup>
