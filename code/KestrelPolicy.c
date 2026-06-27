@@ -94,6 +94,7 @@ typedef struct _KESTREL_POLICY_RESULT {
     KESTREL_POLICY_CHECK  WDigest;
     KESTREL_POLICY_CHECK  NTLMv1;
     KESTREL_POLICY_CHECK  LDAPSigning;
+    KESTREL_POLICY_CHECK  NetlogonAllowList;
     DWORD                 cInsecure;    /* total insecure findings  */
     DWORD                 cUnknown;     /* total unknown            */
     DWORD                 cGPOsScanned;
@@ -181,6 +182,15 @@ KestrelInitCheck(
     _In_z_  LPCWSTR               pwszAttack,
     _In_z_  LPCWSTR               pwszRemediation);
 
+/*
+ * Onelogon (WOOT'26): detect the "Allow vulnerable Netlogon secure channel
+ * connections" allow-list inside a GPO security template (GptTmpl.inf) on SYSVOL.
+ */
+static VOID
+KestrelCheckNetlogonAllowList(
+    _In_z_  LPCWSTR               pwszGpoPath,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck);
+
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Public entry point                                                         */
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -243,6 +253,18 @@ KestrelRunPolicyAudit(
         L"LDAP Signing",
         L"LDAP relay attacks (ntlmrelayx --escalate-user)",
         L"GPO: Domain Controller: LDAP server signing requirements = Require signing");
+
+    KestrelInitCheck(&pResult->NetlogonAllowList,
+        L"Netlogon AllowList",
+        L"Onelogon (WOOT'26) / Zerologon-patch bypass — listed accounts may use "
+        L"unsigned, unsealed Netlogon secure channels",
+        L"GPO: Domain Controller: Allow vulnerable Netlogon secure channel "
+        L"connections = Not Defined (remove every account)");
+    /* Inverted default: no allow-list = enforcement = secure */
+    pResult->NetlogonAllowList.Status = POLICY_SECURE;
+    StringCchCopyW(pResult->NetlogonAllowList.wszDetail,
+        ARRAYSIZE(pResult->NetlogonAllowList.wszDetail),
+        L"No allow-list found (enforcement mode)");
 
     /* ── Enumerate GPOs from AD ──────────────────────────────────── */
     wprintf(L"  [*] Enumerating GPOs...\n");
@@ -344,6 +366,10 @@ KestrelRunPolicyAudit(
             }
         }
 
+        /* Onelogon: vulnerable Netlogon secure-channel allow-list (GptTmpl.inf) */
+        if (pResult->NetlogonAllowList.Status == POLICY_SECURE)
+            KestrelCheckNetlogonAllowList(rgPaths[i], &pResult->NetlogonAllowList);
+
         KestrelFreePolEntries(pEntries);
     }
 
@@ -356,7 +382,7 @@ KestrelRunPolicyAudit(
     /* ── Count results ───────────────────────────────────────────── */
     KESTREL_POLICY_CHECK *rgChecks[] = {
         &pResult->LLMNR, &pResult->NBTNS, &pResult->WDigest,
-        &pResult->NTLMv1, &pResult->LDAPSigning
+        &pResult->NTLMv1, &pResult->LDAPSigning, &pResult->NetlogonAllowList
     };
 
     wprintf(L"  %-20s %-10s %s\n", L"Check", L"Status", L"Detail");
@@ -399,6 +425,169 @@ Cleanup:
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Internal implementations                                                   */
 /* ─────────────────────────────────────────────────────────────────────────── */
+
+/* ───────────────────────────────────────────────────────────────────────────
+ *  KestrelCheckNetlogonAllowList — Onelogon (WOOT'26)
+ *
+ *  The 2020 Zerologon patch left a compatibility escape hatch: an allow-list of
+ *  accounts permitted to use UNSIGNED / UNSEALED Netlogon secure channels. Every
+ *  account on it is an attack surface (Onelogon, residual Zerologon). The list is
+ *  delivered as a registry value inside the GPO security template (GptTmpl.inf)
+ *  as an SDDL string. Absence of the key = enforcement = secure.
+ *
+ *  Footprint: an SMB read of GptTmpl.inf from SYSVOL — same as the rest of this
+ *  module. It sees allow-lists set via a domain GPO, NOT ones written directly
+ *  to a DC's local registry (that would need remote-registry RPC, which Kestrel
+ *  deliberately does not perform).
+ * ─────────────────────────────────────────────────────────────────────────── */
+static VOID
+KestrelCheckNetlogonAllowList(
+    _In_z_  LPCWSTR               pwszGpoPath,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck)
+{
+    WCHAR   wszInfPath[700];
+    HANDLE  hFile;
+    DWORD   cbFile, cbRead = 0;
+    BYTE   *pRaw  = NULL;
+    WCHAR  *pwszText = NULL;
+    WCHAR  *pKey  = NULL;
+
+    if (FAILED(StringCchPrintfW(wszInfPath, ARRAYSIZE(wszInfPath),
+            L"%s\\Machine\\Microsoft\\Windows NT\\SecEdit\\GptTmpl.inf", pwszGpoPath)))
+        return;
+
+    hFile = CreateFileW(wszInfPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE)
+        return;     /* GPO has no security template — nothing to flag */
+
+    cbFile = GetFileSize(hFile, NULL);
+    if (cbFile == INVALID_FILE_SIZE || cbFile == 0 || cbFile > (1u << 20)) {
+        CloseHandle(hFile);
+        return;
+    }
+    pRaw = (BYTE *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)cbFile + 2);
+    if (!pRaw) { CloseHandle(hFile); return; }
+    if (!ReadFile(hFile, pRaw, cbFile, &cbRead, NULL) || cbRead == 0) {
+        HeapFree(GetProcessHeap(), 0, pRaw);
+        CloseHandle(hFile);
+        return;
+    }
+    CloseHandle(hFile);
+
+    /* ── Decode to wide text: UTF-16LE (BOM) or UTF-8 ─────────────────── */
+    if (cbRead >= 2 && pRaw[0] == 0xFF && pRaw[1] == 0xFE) {
+        DWORD cch = (cbRead - 2) / sizeof(WCHAR);
+        pwszText = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(cch + 1) * sizeof(WCHAR));
+        if (pwszText) {
+            memcpy(pwszText, pRaw + 2, (SIZE_T)cch * sizeof(WCHAR));
+            pwszText[cch] = L'\0';
+        }
+    } else {
+        int wn = MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pRaw, (int)cbRead, NULL, 0);
+        if (wn > 0) {
+            pwszText = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(wn + 1) * sizeof(WCHAR));
+            if (pwszText) {
+                MultiByteToWideChar(CP_UTF8, 0, (LPCCH)pRaw, (int)cbRead, pwszText, wn);
+                pwszText[wn] = L'\0';
+            }
+        }
+    }
+    HeapFree(GetProcessHeap(), 0, pRaw);
+    if (!pwszText)
+        return;
+
+    /* ── Locate the VulnerableChannelAllowList key ────────────────────── */
+    for (WCHAR *p = pwszText; *p; p++) {
+        if ((*p == L'V' || *p == L'v') &&
+            _wcsnicmp(p, L"VulnerableChannelAllowList", 26) == 0) {
+            pKey = p;
+            break;
+        }
+    }
+
+    if (pKey) {
+        WCHAR *pEq  = wcschr(pKey, L'=');
+        WCHAR *pq1  = pEq  ? wcschr(pEq, L'"')      : NULL;   /* value is type,"SDDL" */
+        WCHAR *pq2  = pq1  ? wcschr(pq1 + 1, L'"')  : NULL;
+
+        if (pq1 && pq2 && pq2 > pq1 + 1) {
+            WCHAR  wszSddl[1024];
+            size_t n = (size_t)(pq2 - (pq1 + 1));
+
+            if (n < ARRAYSIZE(wszSddl)) {
+                PSECURITY_DESCRIPTOR pSD = NULL;
+                StringCchCopyNW(wszSddl, ARRAYSIZE(wszSddl), pq1 + 1, n);
+
+                if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        wszSddl, SDDL_REVISION_1, &pSD, NULL) && pSD) {
+                    PACL pDacl = NULL;
+                    BOOL bPresent = FALSE, bDef = FALSE;
+
+                    if (GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDef) &&
+                        bPresent && pDacl && pDacl->AceCount > 0) {
+                        WCHAR wszList[256] = { 0 };
+                        DWORD cTrustee = 0;
+
+                        for (WORD i = 0; i < pDacl->AceCount; i++) {
+                            PVOID       pAce = NULL;
+                            ACE_HEADER *pH;
+                            PSID        pSid = NULL;
+                            WCHAR       wszWho[160];
+
+                            if (!GetAce(pDacl, i, &pAce))
+                                continue;
+                            pH = (ACE_HEADER *)pAce;
+                            if (pH->AceType != ACCESS_ALLOWED_ACE_TYPE)
+                                continue;
+                            pSid = (PSID)&((ACCESS_ALLOWED_ACE *)pAce)->SidStart;
+                            if (!pSid || !IsValidSid(pSid))
+                                continue;
+
+                            /* friendly name, fall back to SID string */
+                            {
+                                WCHAR       wszName[128] = { 0 }, wszDom[128] = { 0 };
+                                DWORD       cchN = ARRAYSIZE(wszName), cchD = ARRAYSIZE(wszDom);
+                                SID_NAME_USE use;
+                                if (LookupAccountSidW(NULL, pSid, wszName, &cchN,
+                                        wszDom, &cchD, &use) && wszName[0]) {
+                                    StringCchPrintfW(wszWho, ARRAYSIZE(wszWho),
+                                        wszDom[0] ? L"%s\\%s" : L"%s%s", wszDom, wszName);
+                                } else {
+                                    LPWSTR s = NULL;
+                                    if (ConvertSidToStringSidW(pSid, &s) && s) {
+                                        StringCchCopyW(wszWho, ARRAYSIZE(wszWho), s);
+                                        LocalFree(s);
+                                    } else {
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            if (wszList[0])
+                                StringCchCatW(wszList, ARRAYSIZE(wszList), L", ");
+                            StringCchCatW(wszList, ARRAYSIZE(wszList), wszWho);
+                            cTrustee++;
+                        }
+
+                        if (cTrustee > 0) {
+                            pCheck->Status = POLICY_INSECURE;
+                            StringCchCopyW(pCheck->wszGPOName,
+                                ARRAYSIZE(pCheck->wszGPOName), pwszGpoPath);
+                            StringCchPrintfW(pCheck->wszDetail,
+                                ARRAYSIZE(pCheck->wszDetail),
+                                L"%lu account(s) allow vulnerable Netlogon: %s",
+                                cTrustee, wszList);
+                        }
+                    }
+                    LocalFree(pSD);
+                }
+            }
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, pwszText);
+}
 
 static VOID
 KestrelInitCheck(

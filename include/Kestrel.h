@@ -14,6 +14,7 @@
  *   KestrelGMSA.c   — v0.7  gMSA password reader enumeration
  *   KestrelADCS.c   — v0.7  ADCS certificate-template / CA audit (ESC1-5/9)
  *   KestrelGPP.c    — v0.7  GPP cpassword recovery (SYSVOL/SMB, MS14-025)
+ *   KestrelBaseline.c — v0.8  default-ACL baseline (delegation noise suppression)
  */
 
 #pragma once
@@ -86,6 +87,7 @@ typedef struct _KESTREL_CONFIG {
 
 /* Logging */
 extern BOOL g_bVerbose;
+extern BOOL g_bAclRaw;   /* --acl-raw: disable default-ACL baseline filtering */
 #define KTRACE(fmt, ...) \
     if (g_bVerbose) wprintf(L"[TRACE] " fmt L"\n", ##__VA_ARGS__)
 
@@ -123,7 +125,33 @@ typedef struct _KESTREL_ACL_SCAN_RESULT {
     DWORD              cCapacity;
     DWORD              cObjectsScanned;
     DWORD              cObjectsErrored;
+    DWORD              cSuppressed;     /* default ACEs filtered by baseline */
 } KESTREL_ACL_SCAN_RESULT;
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * Default-ACL baseline — KestrelBaseline.c (v0.8)
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+typedef struct _KESTREL_ACE_SIG {
+    BYTE   bAllow;        /* 1 = allow, 0 = deny           */
+    DWORD  dwMask;
+    BOOL   bHasObjType;
+    GUID   objType;
+    WCHAR  wszSid[80];    /* trustee SID string            */
+} KESTREL_ACE_SIG;
+
+typedef struct _KESTREL_CLASS_BASELINE {
+    WCHAR             wszClass[64];     /* lDAPDisplayName            */
+    KESTREL_ACE_SIG  *rgSig;            /* default ACEs for the class */
+    DWORD             cSig;
+} KESTREL_CLASS_BASELINE;
+
+typedef struct _KESTREL_ACL_BASELINE {
+    KESTREL_CLASS_BASELINE *rgClass;    /* per-class defaultSecurityDescriptor */
+    DWORD                   cClass;
+    KESTREL_ACE_SIG        *rgAdminSD;  /* AdminSDHolder DACL (adminCount=1)   */
+    DWORD                   cAdminSD;
+} KESTREL_ACL_BASELINE;
 
 /* ── Delegation ──────────────────────────────────────────────────────────── */
 typedef enum _KESTREL_DELEG_KIND {
@@ -464,6 +492,26 @@ VOID KestrelFreeACLScanResult(
 _Must_inspect_result_
 DWORD KestrelAnalyzeDCSync(
     _In_opt_ const KESTREL_ACL_SCAN_RESULT *pACL);
+
+/* ════════════════════════════════════════════════════════════════════════════
+ * KestrelBaseline.c — v0.8
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+_Must_inspect_result_
+HRESULT KestrelBuildACLBaseline(
+    _Outptr_ KESTREL_ACL_BASELINE **ppBaseline);
+
+BOOL KestrelAceIsBaseline(
+    _In_     const KESTREL_ACL_BASELINE *pBaseline,
+    _In_z_   LPCWSTR                     pwszLeafClass,
+    _In_     BOOL                        bAdminCount,
+    _In_     BOOL                        bAllow,
+    _In_     DWORD                       dwMask,
+    _In_opt_ const GUID                 *pObjType,
+    _In_     PSID                        pTrusteeSid);
+
+VOID KestrelFreeACLBaseline(
+    _In_opt_ KESTREL_ACL_BASELINE *pBaseline);
 
 /* ════════════════════════════════════════════════════════════════════════════
  * KestrelGroup.c — v0.3

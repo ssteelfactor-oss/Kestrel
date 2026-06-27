@@ -52,7 +52,7 @@ Kestrel does not fragment queries, randomize timing, or hide. It looks normal be
 - Windows, domain-joined machine
 - Authenticated domain user account (no elevated privileges required for any scan)
 - Visual Studio 2019+ with Windows SDK
-- Linked libraries: `activeds.lib`, `adsiid.lib`, `ws2_32.lib`, `advapi32.lib`
+- Linked libraries: `activeds.lib`, `adsiid.lib`, `ws2_32.lib`, `advapi32.lib`, `bcrypt.lib`
 
 ## Build
 
@@ -89,7 +89,9 @@ Kestrel.exe --help
 | `--trust`      | Domain/forest trust posture                                  |
 | `--gmsa`       | gMSA password reader enumeration                             |
 | `--adcs`       | ADCS certificate-template / CA audit (ESC1-5/9)              |
+| `--gpp`        | GPP cpassword recovery from SYSVOL (MS14-025)                |
 | `--report <f>` | Write report (extension selects HTML / JSON / YAML)          |
+| `--acl-raw`    | Disable default-ACL baseline (show raw ACL edges)           |
 
 With no module flags, Kestrel runs everything.
 
@@ -123,6 +125,8 @@ Two read modes:
 Plan A is attempted first. On first access denial, Kestrel switches to Plan B automatically for all remaining objects.
 
 A DCSync rights pass surfaces principals holding `GetChanges` + `GetChangesAll` over the domain head.
+
+Since v0.8 a **default-ACL baseline** (`KestrelBaseline.c`) cuts the noise: every object's ACEs are compared against the `defaultSecurityDescriptor` for its class — and against AdminSDHolder for `adminCount=1` objects — so only the rights an admin actually delegated are reported, not the defaults every object is born with. `--acl-raw` disables the filter.
 
 ### v0.3 Transitive group membership (`KestrelGroup.c`)
 
@@ -169,6 +173,8 @@ Uses a compact CSR adjacency representation and output caps (per-target and glob
 
 The one module that steps outside LDAP (see *Footprint*). GPO settings live on SYSVOL, so this reads `Registry.pol` over SMB and parses `dSHeuristics`. Flags LLMNR, NBT-NS, WDigest, NTLMv1, and missing LDAP signing.
 
+It also flags the **Onelogon** (WOOT'26) surface — the *Allow vulnerable Netlogon secure channel connections* allow-list, i.e. accounts permitted to use unsigned/unsealed Netlogon channels (the compatibility hole left by the 2020 Zerologon patch). Each GPO's `GptTmpl.inf` is read and its `VulnerableChannelAllowList` SDDL decoded into the exempted principals. Domain-GPO scope only — an allow-list written directly to a DC's local registry would need remote-registry RPC, which Kestrel does not do.
+
 ### v0.6 Roastable accounts (`KestrelRoast.c`)
 
 - **Kerberoastable** - user accounts carrying an SPN (krbtgt excluded).
@@ -201,6 +207,14 @@ Findings are cross-referenced against templates actually published by a CA - an 
 
 ESC6 (CA registry flag), ESC7 (CA role ACL), and ESC8 (web-enrollment endpoint) are intentionally **out of scope**: none is observable from a passive LDAP read.
 
+### v0.7 GPP cpassword recovery (`KestrelGPP.c`)
+
+Walks SYSVOL over SMB and parses every Group Policy Preferences XML (Groups, Services, ScheduledTasks, DataSources, Drives, Printers) for `cpassword` — credentials AES-encrypted with the key Microsoft published in 2014 (MS14-025). Any domain user can recover them, so they are decrypted and shown (with the account and GPO) to prove recoverability and force rotation. Largely legacy, but old values persist on SYSVOL for years. Same footprint as the policy audit (an SMB read of SYSVOL). Plaintext buffers are scrubbed with `SecureZeroMemory`.
+
+### v0.8 Default-ACL baseline (`KestrelBaseline.c`)
+
+Not a scan but a filter for the ACL module. It builds a baseline of "expected" ACEs from two authoritative, ordinary-user, pure-LDAP sources — each `classSchema`'s `defaultSecurityDescriptor`, and the `AdminSDHolder` DACL (for `adminCount=1` objects) — then suppresses object ACEs that match it. What remains is the set of genuine, admin-introduced delegations, not the rights every object inherits at birth. `--acl-raw` turns it off to show the raw set.
+
 ## Roadmap
 
 | Version | Status | Description                                                                 |
@@ -211,10 +225,11 @@ ESC6 (CA registry flag), ESC7 (CA role ACL), and ESC8 (web-enrollment endpoint) 
 | v0.4    | ✅      | In-memory graph from ACL + membership + delegation. HTML / JSON / YAML.     |
 | v0.5    | ✅      | BFS path finder + GPO security policy audit                                 |
 | v0.6    | ✅      | Kerberoastable + AS-REP Roastable detection                                 |
-| v0.7    | ✅      | Trust posture · gMSA password readers · ADCS ESC1-5/9                       |
-| -       | 🔲      | GPP `cpassword` recovery (SYSVOL, public AES key)                           |
+| v0.7    | ✅      | Trust posture · gMSA password readers · ADCS ESC1-5/9 · GPP cpassword       |
+| v0.8    | ✅      | Default-ACL baseline (delegation noise suppression) · Onelogon detection    |
 | -       | 🔲      | LAPS coverage/health anomalies (expiry-based, incl. rotation suppression)   |
 | -       | 🔲      | `ms-DS-MachineAccountQuota` + RBCD weaponizability enrichment               |
+| -       | 🔲      | Trust / ADCS edges in the graph + report                                    |
 | -       | 🔲      | ADExplorer snapshot as an offline input source (diff over time)             |
 
 ## Screens

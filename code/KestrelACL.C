@@ -32,7 +32,8 @@ static LPWSTR g_rgszObjectAttrs[] = {
     L"distinguishedName",
     L"objectClass",
     L"objectSid",
-    L"nTSecurityDescriptor"
+    L"nTSecurityDescriptor",
+    L"adminCount"
 };
 #define KESTREL_OBJECT_ATTR_COUNT \
     (sizeof(g_rgszObjectAttrs) / sizeof(g_rgszObjectAttrs[0]))
@@ -168,7 +169,9 @@ KestrelWalkDacl(
     _In_z_   LPCWSTR                       pwszTargetDN,
     _In_z_   LPCWSTR                       pwszObjectClass,
     _In_opt_ const KESTREL_EXTENDED_RIGHT* pRightsHead,
-    _Inout_  KESTREL_ACL_SCAN_RESULT* pResult
+    _In_opt_ const KESTREL_ACL_BASELINE*   pBaseline,
+    _In_     BOOL                          bAdminCount,
+    _Inout_  KESTREL_ACL_SCAN_RESULT*      pResult
 );
 
 /*
@@ -532,6 +535,8 @@ KestrelWalkDacl(
     _In_z_   LPCWSTR                       pwszTargetDN,
     _In_z_   LPCWSTR                       pwszObjectClass,
     _In_opt_ const KESTREL_EXTENDED_RIGHT* pRightsHead,
+    _In_opt_ const KESTREL_ACL_BASELINE* pBaseline,
+    _In_     BOOL                          bAdminCount,
     _Inout_  KESTREL_ACL_SCAN_RESULT* pResult)
 {
     if (!pDacl || !pwszTargetDN || !pwszObjectClass || !pResult)
@@ -585,6 +590,14 @@ KestrelWalkDacl(
 
         KESTREL_ACL_EDGE_TYPE edgeType = KestrelClassifyAccessMask(dwMask, pObjectType);
         if (edgeType == EDGE_UNKNOWN) continue;
+
+        /* Drop ACEs that match the schema / AdminSDHolder default — not a delegation */
+        if (!g_bAclRaw && pBaseline &&
+            KestrelAceIsBaseline(pBaseline, pwszObjectClass, bAdminCount,
+                !bDeny, dwMask, pObjectType, pTrusteeSid)) {
+            pResult->cSuppressed++;
+            continue;
+        }
 
         /* Build the edge record */
         KESTREL_ACL_EDGE edge = { 0 };
@@ -685,6 +698,7 @@ KestrelScanACLEdges(
     WCHAR                    wszPath[512];
     WCHAR                    wszConfigNC[512];
     BOOL                     bUsePlanB = FALSE;
+    KESTREL_ACL_BASELINE*    pBaseline = 0;
 
     if (!pwszDomainNC || !ppResult) return E_INVALIDARG;
     *ppResult = 0;
@@ -713,6 +727,14 @@ KestrelScanACLEdges(
     if (FAILED(hr)) {
         wprintf(L"  [!] KestrelBuildExtendedRightsTable: 0x%08X\n", hr);
         goto Cleanup;
+    }
+    if (!g_bAclRaw) {
+        wprintf(L"  [*] Building default-ACL baseline...\n");
+        HRESULT hrBase = KestrelBuildACLBaseline(&pBaseline);
+        if (FAILED(hrBase)) {
+            wprintf(L"  [!] Baseline build failed (0x%08X) — continuing raw\n", hrBase);
+            pBaseline = NULL;
+        }
     }
 
     /* ── 4. Bind IDirectorySearch ─────────────────────────────────────── */
@@ -802,6 +824,17 @@ KestrelScanACLEdges(
         if (!bGotClass)
             StringCchCopyW(wszClass, ARRAYSIZE(wszClass), L"unknown");
 
+        /* ── Get adminCount (protected-object flag) ───────────────────── */
+        BOOL bAdminCount = FALSE;
+        ADS_SEARCH_COLUMN colAdmin = { 0 };
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+            L"adminCount", &colAdmin)) && colAdmin.dwNumValues > 0) {
+            if (colAdmin.pADsValues[0].dwType == ADSTYPE_INTEGER &&
+                colAdmin.pADsValues[0].Integer == 1)
+                bAdminCount = TRUE;
+            pSearch->lpVtbl->FreeColumn(pSearch, &colAdmin);
+        }
+
         /* ── Obtain SECURITY_DESCRIPTOR ──────────────────────────────── */
         PSECURITY_DESCRIPTOR pSD = NULL;
         BOOL                 bOwnsSD = FALSE; /* TRUE = HeapAlloc, must HeapFree
@@ -863,7 +896,7 @@ KestrelScanACLEdges(
             if (GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDefault) &&
                 bPresent && pDacl) {
                 HRESULT hrW = KestrelWalkDacl(pDacl, wszDN, wszClass,
-                    pRights, pResult);
+                    pRights, pBaseline, bAdminCount, pResult);
                 if (FAILED(hrW))
                     pResult->cObjectsErrored++;
             }
@@ -906,20 +939,23 @@ KestrelScanACLEdges(
     }
 
     wprintf(L"\n  [*] Mode: %s\n", bUsePlanB ? L"Plan B (LDAP column)" : L"Plan A (per-object bind)");
-    wprintf(L"  [*] Objects scanned: %lu  |  Edges found: %lu  |  Errors: %lu\n",
+    wprintf(L"  [*] Objects scanned: %lu  |  Delegations: %lu  |  Default ACEs suppressed: %lu  |  Errors: %lu\n",
         pResult->cObjectsScanned,
         pResult->cEdges,
-        pResult->cObjectsErrored);
+        pResult->cSuppressed,
+        pResult->cObjectsErrored);  
 
     *ppResult = pResult;
-    pResult = NULL;
+    pResult = 0;
 
 Cleanup:
-    if (hSearch && pSearch)
-        pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if ( hSearch && pSearch )
+        pSearch->lpVtbl->CloseSearchHandle( pSearch, hSearch );
     if (pSearch)
         pSearch->lpVtbl->Release(pSearch);
-    KestrelFreeExtendedRightsTable(pRights);
+    if (pRights != 0) KestrelFreeExtendedRightsTable( pRights );
+    //KestrelFreeExtendedRightsTable( pRights );
+    if (pBaseline) KestrelFreeACLBaseline(pBaseline);
     if (pResult) KestrelFreeACLScanResult(pResult);
     return hr;
 }
@@ -1074,8 +1110,8 @@ KestrelAceDecode(
     ACE_HEADER *pHeader = (ACE_HEADER *)pAce;
 
     *pdwMask      = 0;
-    *ppTrusteeSid = NULL;
-    *ppObjectType = NULL;
+    *ppTrusteeSid = 0;
+    *ppObjectType = 0;
     *pbDeny       = FALSE;
 
     switch (pHeader->AceType) {
@@ -1083,7 +1119,7 @@ KestrelAceDecode(
     case ACCESS_DENIED_ACE_TYPE: {
         ACCESS_ALLOWED_ACE *p = (ACCESS_ALLOWED_ACE *)pAce;
         *pdwMask      = p->Mask;
-        *ppTrusteeSid = (PSID)&p->SidStart;
+        *ppTrusteeSid = ( PSID ) & p->SidStart;
         *pbDeny       = (pHeader->AceType == ACCESS_DENIED_ACE_TYPE);
         return TRUE;
     }

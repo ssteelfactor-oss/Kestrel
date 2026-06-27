@@ -19,13 +19,14 @@
  *   --trust        Domain/forest trust posture
  *   --gmsa         gMSA password reader enumeration
  *   --adcs         ADCS certificate-template / CA audit (ESC1-5/9)
- *   --gpp          GPP password reader enumeration (ESC1-5)
+ *   --gpp          GPP cpassword recovery (SYSVOL)
  *
  * Output:
  *   --report <path>  Generate report (.html / .json / .yaml)
  *
  * Options:
  *   --verbose / -v   Enable trace output
+ *   --acl-raw        Disable default-ACL baseline filtering (raw ACL edges)
  *   --version        Show version and exit
  *   --help / -h      Show this help and exit
  */
@@ -33,6 +34,7 @@
 #include "../include/Kestrel.h"
 
 BOOL g_bVerbose = FALSE;
+BOOL g_bAclRaw  = FALSE;
 
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Help and version                                                           */
@@ -68,11 +70,12 @@ KestrelPrintHelp(VOID)
         L"  --trust        Domain/forest trust posture audit\n"
         L"  --gmsa         gMSA password reader enumeration\n"
         L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
-        L"  --gpp          GPP password reader enumeration (ESC1-5)\n\n"
+        L"  --gpp          GPP cpassword recovery (SYSVOL/SMB)\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n\n"
         L"OPTIONS:\n"
         L"  --verbose / -v   Enable trace output\n"
+        L"  --acl-raw        Disable default-ACL baseline (show raw ACL edges)\n"
         L"  --version        Show version and exit\n"
         L"  --help / -h      Show this help and exit\n\n"
         L"EXAMPLES:\n"
@@ -138,6 +141,10 @@ KestrelParseArgs(
             _wcsicmp(arg, L"-v") == 0) {
             pCfg->bVerbose = TRUE;
             g_bVerbose = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--acl-raw") == 0) {
+            g_bAclRaw = TRUE;
             continue;
         }
 
@@ -490,6 +497,7 @@ Cleanup:
     KestrelFreeTrustScanResult(pTrust);
     KestrelFreeGMSAScanResult(pGMSA);
     KestrelFreeADCSScanResult(pADCS);
+    KestrelFreeGPPScanResult(pGPP);
     KestrelFreeGraph(pGraph);
     CoUninitialize();
     return HRESULT_CODE(hr);
