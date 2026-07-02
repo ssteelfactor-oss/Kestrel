@@ -95,6 +95,9 @@ typedef struct _KESTREL_POLICY_RESULT {
     KESTREL_POLICY_CHECK  NTLMv1;
     KESTREL_POLICY_CHECK  LDAPSigning;
     KESTREL_POLICY_CHECK  NetlogonAllowList;
+    KESTREL_POLICY_CHECK  SMBSigning;
+    KESTREL_POLICY_CHECK  AnonymousLDAP;
+    KESTREL_POLICY_CHECK  PreWin2000;
     DWORD                 cInsecure;    /* total insecure findings  */
     DWORD                 cUnknown;     /* total unknown            */
     DWORD                 cGPOsScanned;
@@ -191,6 +194,33 @@ KestrelCheckNetlogonAllowList(
     _In_z_  LPCWSTR               pwszGpoPath,
     _Inout_ KESTREL_POLICY_CHECK *pCheck);
 
+/*
+ * SMB signing enforcement (RequireSecuritySignature) from a GPO security
+ * template — the control that blocks NTLM relay/reflection (CVE-2025-33073,
+ * CVE-2026-24294).
+ */
+static VOID
+KestrelCheckSMBSigning(
+    _In_z_  LPCWSTR               pwszGpoPath,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck);
+
+/*
+ * Anonymous / unauthenticated directory-enumeration surface (LDAP posture):
+ * dSHeuristics fLDAPBlockAnonOps, and the Pre-Windows 2000 Compatible Access
+ * group membership. Both are LDAP reads of the domain/config partitions.
+ */
+_Must_inspect_result_
+static HRESULT
+KestrelCheckAnonymousLDAP(
+    _In_z_  LPCWSTR               pwszDomainNC,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck);
+
+_Must_inspect_result_
+static HRESULT
+KestrelCheckPreWin2000(
+    _In_z_  LPCWSTR               pwszDomainNC,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck);
+
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Public entry point                                                         */
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -265,6 +295,40 @@ KestrelRunPolicyAudit(
     StringCchCopyW(pResult->NetlogonAllowList.wszDetail,
         ARRAYSIZE(pResult->NetlogonAllowList.wszDetail),
         L"No allow-list found (enforcement mode)");
+
+    KestrelInitCheck(&pResult->SMBSigning,
+        L"SMB Signing",
+        L"NTLM relay / reflection (CVE-2025-33073, CVE-2026-24294) — unsigned SMB "
+        L"lets coerced authentication be relayed for SYSTEM",
+        L"GPO: Microsoft network server/client: Digitally sign communications "
+        L"(always) = Enabled");
+    /* Not defined by GPO != enforced by host: leave UNKNOWN, flip on a GPO value */
+    pResult->SMBSigning.Status = POLICY_UNKNOWN;
+    StringCchCopyW(pResult->SMBSigning.wszDetail,
+        ARRAYSIZE(pResult->SMBSigning.wszDetail),
+        L"Not defined by GPO — relies on OS default (member servers / Server 2025 "
+        L"do not require server-side SMB signing by default)");
+
+    KestrelInitCheck(&pResult->AnonymousLDAP,
+        L"Anonymous LDAP",
+        L"Unauthenticated directory enumeration — anonymous bind/search leaks "
+        L"users, groups and ACLs with no credentials",
+        L"dSHeuristics 7th character = 0 (default); never set it to 2");
+    pResult->AnonymousLDAP.Status = POLICY_SECURE;   /* blocked by default */
+    StringCchCopyW(pResult->AnonymousLDAP.wszDetail,
+        ARRAYSIZE(pResult->AnonymousLDAP.wszDetail),
+        L"Anonymous LDAP operations blocked (default)");
+
+    KestrelInitCheck(&pResult->PreWin2000,
+        L"Pre-Win2000 Access",
+        L"Unauthenticated enumeration via an over-broad Pre-Windows 2000 "
+        L"Compatible Access group (Anonymous Logon / Everyone members)",
+        L"Remove Anonymous Logon and Everyone from CN=Pre-Windows 2000 "
+        L"Compatible Access,CN=Builtin");
+    pResult->PreWin2000.Status = POLICY_SECURE;      /* no anon/Everyone by default */
+    StringCchCopyW(pResult->PreWin2000.wszDetail,
+        ARRAYSIZE(pResult->PreWin2000.wszDetail),
+        L"No Anonymous Logon / Everyone members");
 
     /* ── Enumerate GPOs from AD ──────────────────────────────────── */
     wprintf(L"  [*] Enumerating GPOs...\n");
@@ -370,6 +434,10 @@ KestrelRunPolicyAudit(
         if (pResult->NetlogonAllowList.Status == POLICY_SECURE)
             KestrelCheckNetlogonAllowList(rgPaths[i], &pResult->NetlogonAllowList);
 
+        /* SMB signing enforcement (GptTmpl.inf) — NTLM relay/reflection control */
+        if (pResult->SMBSigning.Status != POLICY_SECURE)
+            KestrelCheckSMBSigning(rgPaths[i], &pResult->SMBSigning);
+
         KestrelFreePolEntries(pEntries);
     }
 
@@ -379,10 +447,20 @@ KestrelRunPolicyAudit(
         wprintf(L"  [!] LDAPSigning check failed: 0x%08X\n", hr);
     hr = S_OK;  /* non-fatal, continue */
 
+    /* ── Anonymous LDAP posture — dSHeuristics + Pre-Win2000 group ── */
+    hr = KestrelCheckAnonymousLDAP(pwszDomainNC, &pResult->AnonymousLDAP);
+    if ( FAILED ( hr ) )
+        wprintf(L"  [!] AnonymousLDAP check failed: 0x%08X\n", hr);
+    hr = KestrelCheckPreWin2000(pwszDomainNC, &pResult->PreWin2000);
+    if ( FAILED ( hr ) )
+        wprintf(L"  [!] PreWin2000 check failed: 0x%08X\n", hr);
+    hr = S_OK;  /* non-fatal, continue */
+
     /* ── Count results ───────────────────────────────────────────── */
     KESTREL_POLICY_CHECK *rgChecks[] = {
         &pResult->LLMNR, &pResult->NBTNS, &pResult->WDigest,
-        &pResult->NTLMv1, &pResult->LDAPSigning, &pResult->NetlogonAllowList
+        &pResult->NTLMv1, &pResult->LDAPSigning, &pResult->NetlogonAllowList,
+        &pResult->SMBSigning, &pResult->AnonymousLDAP, &pResult->PreWin2000
     };
 
     wprintf(L"  %-20s %-10s %s\n", L"Check", L"Status", L"Detail");
@@ -427,55 +505,43 @@ Cleanup:
 /* ─────────────────────────────────────────────────────────────────────────── */
 
 /* ───────────────────────────────────────────────────────────────────────────
- *  KestrelCheckNetlogonAllowList — Onelogon (WOOT'26)
- *
- *  The 2020 Zerologon patch left a compatibility escape hatch: an allow-list of
- *  accounts permitted to use UNSIGNED / UNSEALED Netlogon secure channels. Every
- *  account on it is an attack surface (Onelogon, residual Zerologon). The list is
- *  delivered as a registry value inside the GPO security template (GptTmpl.inf)
- *  as an SDDL string. Absence of the key = enforcement = secure.
- *
- *  Footprint: an SMB read of GptTmpl.inf from SYSVOL — same as the rest of this
- *  module. It sees allow-lists set via a domain GPO, NOT ones written directly
- *  to a DC's local registry (that would need remote-registry RPC, which Kestrel
- *  deliberately does not perform).
+ *  KestrelReadGptTmpl — read a GPO's SecEdit security template (GptTmpl.inf)
+ *  from SYSVOL over SMB and return it as NUL-terminated wide text (UTF-16LE with
+ *  BOM, or UTF-8). Caller frees with HeapFree(GetProcessHeap(), 0, ...).
+ *  Returns NULL if the template is absent, unreadable, or implausibly large.
  * ─────────────────────────────────────────────────────────────────────────── */
-static VOID
-KestrelCheckNetlogonAllowList(
-    _In_z_  LPCWSTR               pwszGpoPath,
-    _Inout_ KESTREL_POLICY_CHECK *pCheck)
+static WCHAR *
+KestrelReadGptTmpl(_In_z_ LPCWSTR pwszGpoPath)
 {
     WCHAR   wszInfPath[700];
     HANDLE  hFile;
     DWORD   cbFile, cbRead = 0;
-    BYTE   *pRaw  = NULL;
+    BYTE   *pRaw     = NULL;
     WCHAR  *pwszText = NULL;
-    WCHAR  *pKey  = NULL;
 
     if (FAILED(StringCchPrintfW(wszInfPath, ARRAYSIZE(wszInfPath),
             L"%s\\Machine\\Microsoft\\Windows NT\\SecEdit\\GptTmpl.inf", pwszGpoPath)))
-        return;
+        return NULL;
 
     hFile = CreateFileW(wszInfPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                 NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE)
-        return;     /* GPO has no security template — nothing to flag */
+        return NULL;
 
     cbFile = GetFileSize(hFile, NULL);
     if (cbFile == INVALID_FILE_SIZE || cbFile == 0 || cbFile > (1u << 20)) {
         CloseHandle(hFile);
-        return;
+        return NULL;
     }
     pRaw = (BYTE *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)cbFile + 2);
-    if (!pRaw) { CloseHandle(hFile); return; }
+    if (!pRaw) { CloseHandle(hFile); return NULL; }
     if (!ReadFile(hFile, pRaw, cbFile, &cbRead, NULL) || cbRead == 0) {
         HeapFree(GetProcessHeap(), 0, pRaw);
         CloseHandle(hFile);
-        return;
+        return NULL;
     }
     CloseHandle(hFile);
 
-    /* ── Decode to wide text: UTF-16LE (BOM) or UTF-8 ─────────────────── */
     if (cbRead >= 2 && pRaw[0] == 0xFF && pRaw[1] == 0xFE) {
         DWORD cch = (cbRead - 2) / sizeof(WCHAR);
         pwszText = (WCHAR *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)(cch + 1) * sizeof(WCHAR));
@@ -494,6 +560,115 @@ KestrelCheckNetlogonAllowList(
         }
     }
     HeapFree(GetProcessHeap(), 0, pRaw);
+    return pwszText;
+}
+
+/* Find "<...key> = <type>,<dword>" in GptTmpl text (case-insensitive substring
+ * match on the key path). Returns TRUE and *pdwVal on hit, FALSE otherwise. */
+static BOOL
+_GptTmplGetDword(_In_z_ LPCWSTR pwszText, _In_z_ LPCWSTR pwszKey, _Out_ DWORD *pdwVal)
+{
+    size_t cchKey = wcslen(pwszKey);
+
+    *pdwVal = 0;
+    for (const WCHAR *p = pwszText; *p; p++) {
+        if (_wcsnicmp(p, pwszKey, (int)cchKey) == 0) {
+            const WCHAR *pEq = wcschr(p, L'=');
+            const WCHAR *pn;
+            DWORD        v = 0;
+            if (!pEq)
+                return FALSE;
+            pn = wcschr(pEq, L',');          /* value is "<type>,<data>" */
+            pn = pn ? pn + 1 : pEq + 1;
+            while (*pn == L' ' || *pn == L'\t' || *pn == L'"')
+                pn++;
+            while (*pn >= L'0' && *pn <= L'9')
+                v = v * 10 + (DWORD)(*pn++ - L'0');
+            *pdwVal = v;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ *  KestrelCheckSMBSigning — NTLM relay / reflection control (CVE-2025-33073,
+ *  CVE-2026-24294)
+ *
+ *  Unsigned SMB is the precondition for relaying coerced authentication back to
+ *  a host for SYSTEM. The hardening is the "Digitally sign communications
+ *  (always)" security option (RequireSecuritySignature = 1) for the SMB server
+ *  (LanManServer) and client (LanmanWorkstation), delivered via GptTmpl.inf.
+ *  Server-side enforcement is the value that blocks the reflected relay, so it
+ *  drives the verdict; the client value is reported alongside.
+ *
+ *  Same footprint (SMB read of SYSVOL). GPO scope only — a value set directly in
+ *  a host's local registry, or an OS default (DCs, Windows 11 24H2), is not
+ *  visible here.
+ * ─────────────────────────────────────────────────────────────────────────── */
+static VOID
+KestrelCheckSMBSigning(
+    _In_z_  LPCWSTR               pwszGpoPath,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck)
+{
+    WCHAR *pwszText = KestrelReadGptTmpl(pwszGpoPath);
+    DWORD  dwServer = 0, dwClient = 0;
+    BOOL   bHaveServer, bHaveClient;
+
+    if (!pwszText)
+        return;
+
+    bHaveServer = _GptTmplGetDword(pwszText,
+        L"LanManServer\\Parameters\\RequireSecuritySignature", &dwServer);
+    bHaveClient = _GptTmplGetDword(pwszText,
+        L"LanmanWorkstation\\Parameters\\RequireSecuritySignature", &dwClient);
+
+    if (bHaveServer) {
+        WCHAR wszClient[48];
+        StringCchPrintfW(wszClient, ARRAYSIZE(wszClient),
+            bHaveClient ? (dwClient == 1 ? L"client=required" : L"client=off")
+                        : L"client=not-defined");
+
+        if (dwServer == 1) {
+            pCheck->Status = POLICY_SECURE;
+            StringCchCopyW(pCheck->wszGPOName, ARRAYSIZE(pCheck->wszGPOName), pwszGpoPath);
+            StringCchPrintfW(pCheck->wszDetail, ARRAYSIZE(pCheck->wszDetail),
+                L"server signing required; %s", wszClient);
+        } else if (pCheck->Status != POLICY_SECURE) {
+            pCheck->Status = POLICY_INSECURE;
+            StringCchCopyW(pCheck->wszGPOName, ARRAYSIZE(pCheck->wszGPOName), pwszGpoPath);
+            StringCchPrintfW(pCheck->wszDetail, ARRAYSIZE(pCheck->wszDetail),
+                L"server signing disabled (=%lu); %s - relay/reflection exposed",
+                dwServer, wszClient);
+        }
+    }
+    /* server not defined here: leave prior status (UNKNOWN unless a GPO set it) */
+
+    HeapFree(GetProcessHeap(), 0, pwszText);
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ *  KestrelCheckNetlogonAllowList — Onelogon (WOOT'26)
+ *
+ *  The 2020 Zerologon patch left a compatibility escape hatch: an allow-list of
+ *  accounts permitted to use UNSIGNED / UNSEALED Netlogon secure channels. Every
+ *  account on it is an attack surface (Onelogon, residual Zerologon). The list is
+ *  delivered as a registry value inside the GPO security template (GptTmpl.inf)
+ *  as an SDDL string. Absence of the key = enforcement = secure.
+ *
+ *  Footprint: an SMB read of GptTmpl.inf from SYSVOL — same as the rest of this
+ *  module. It sees allow-lists set via a domain GPO, NOT ones written directly
+ *  to a DC's local registry (that would need remote-registry RPC, which Kestrel
+ *  deliberately does not perform).
+ * ─────────────────────────────────────────────────────────────────────────── */
+static VOID
+KestrelCheckNetlogonAllowList(
+    _In_z_  LPCWSTR               pwszGpoPath,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck)
+{
+    WCHAR *pwszText = KestrelReadGptTmpl(pwszGpoPath);
+    WCHAR *pKey     = NULL;
+
     if (!pwszText)
         return;
 
@@ -1153,6 +1328,159 @@ Cleanup:
         pSearch->lpVtbl->Release(pSearch);
     return hr;
 }
+
+/* ───────────────────────────────────────────────────────────────────────────
+ *  KestrelCheckAnonymousLDAP — dSHeuristics fLDAPBlockAnonOps
+ *
+ *  The 7th character of dSHeuristics (fLDAPBlockAnonOps) controls whether the
+ *  DC accepts anonymous LDAP bind + search. Default/absent = blocked (only the
+ *  anonymous rootDSE read is allowed). '2' = anonymous operations enabled, which
+ *  hands unauthenticated callers the full user/group/ACL enumeration surface.
+ * ─────────────────────────────────────────────────────────────────────────── */
+_Must_inspect_result_
+static HRESULT
+KestrelCheckAnonymousLDAP(
+    _In_z_  LPCWSTR               pwszDomainNC,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck)
+{
+    HRESULT             hr;
+    IDirectorySearch   *pSearch = 0;
+    ADS_SEARCH_HANDLE   hSearch = 0;
+    WCHAR               wszPath[512];
+    ADS_SEARCHPREF_INFO prefs[1];
+    LPWSTR              attrs[] = { L"dSHeuristics" };
+
+    if (!pwszDomainNC || !pCheck) return E_INVALIDARG;
+
+    hr = StringCchPrintfW(wszPath, ARRAYSIZE(wszPath),
+        L"LDAP://CN=Directory Service,CN=Windows NT,"
+        L"CN=Services,CN=Configuration,%s", pwszDomainNC);
+    if (FAILED(hr)) return hr;
+
+    hr = ADsGetObject(wszPath, &IID_IDirectorySearch, (void **)&pSearch);
+    if (FAILED(hr)) {
+        pCheck->Status = POLICY_UNKNOWN;
+        StringCchCopyW(pCheck->wszDetail, ARRAYSIZE(pCheck->wszDetail),
+            L"Could not read Directory Service object");
+        return S_OK;   /* non-fatal */
+    }
+
+    prefs[0].dwSearchPref   = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType  = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_BASE;
+    pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 1);
+
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+        L"(objectClass=nTDSService)", attrs, ARRAYSIZE(attrs), &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    if (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+        ADS_SEARCH_COLUMN col = { 0 };
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"dSHeuristics", &col)) &&
+            col.dwNumValues > 0 &&
+            col.pADsValues[0].dwType == ADSTYPE_CASE_IGNORE_STRING) {
+            LPCWSTR h = col.pADsValues[0].CaseIgnoreString;
+            /* 7th character (index 6) = fLDAPBlockAnonOps; '2' = anon enabled */
+            if (wcslen(h) >= 7 && h[6] == L'2') {
+                pCheck->Status = POLICY_INSECURE;
+                StringCchCopyW(pCheck->wszGPOName, ARRAYSIZE(pCheck->wszGPOName),
+                    L"dSHeuristics attribute");
+                StringCchCopyW(pCheck->wszDetail, ARRAYSIZE(pCheck->wszDetail),
+                    L"dSHeuristics[7]=2 (fLDAPBlockAnonOps) - anonymous LDAP bind/search enabled");
+            }
+            pSearch->lpVtbl->FreeColumn(pSearch, &col);
+        }
+    }
+
+Cleanup:
+    if (hSearch) pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)  pSearch->lpVtbl->Release(pSearch);
+    return SUCCEEDED(hr) ? S_OK : hr;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ *  KestrelCheckPreWin2000 — Pre-Windows 2000 Compatible Access membership
+ *
+ *  If this builtin group contains Anonymous Logon (S-1-5-7) or Everyone
+ *  (S-1-1-0), unauthenticated principals inherit read access to user/group
+ *  objects — reopening the pre-credential enumeration surface. Authenticated
+ *  Users (S-1-5-11) is broad legacy compat but still authenticated, so it is
+ *  reported informationally rather than flagged.
+ * ─────────────────────────────────────────────────────────────────────────── */
+_Must_inspect_result_
+static HRESULT
+KestrelCheckPreWin2000(
+    _In_z_  LPCWSTR               pwszDomainNC,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck)
+{
+    HRESULT             hr;
+    IDirectorySearch   *pSearch = 0;
+    ADS_SEARCH_HANDLE   hSearch = 0;
+    WCHAR               wszPath[512];
+    ADS_SEARCHPREF_INFO prefs[1];
+    LPWSTR              attrs[] = { L"member" };
+
+    if (!pwszDomainNC || !pCheck) return E_INVALIDARG;
+
+    hr = StringCchPrintfW(wszPath, ARRAYSIZE(wszPath),
+        L"LDAP://CN=Pre-Windows 2000 Compatible Access,CN=Builtin,%s", pwszDomainNC);
+    if (FAILED(hr)) return hr;
+
+    hr = ADsGetObject(wszPath, &IID_IDirectorySearch, (void **)&pSearch);
+    if (FAILED(hr)) {
+        pCheck->Status = POLICY_UNKNOWN;
+        StringCchCopyW(pCheck->wszDetail, ARRAYSIZE(pCheck->wszDetail),
+            L"Could not read Pre-Windows 2000 Compatible Access group");
+        return S_OK;   /* non-fatal */
+    }
+
+    prefs[0].dwSearchPref   = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType  = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_BASE;
+    pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 1);
+
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+        L"(objectClass=group)", attrs, ARRAYSIZE(attrs), &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    if (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+        ADS_SEARCH_COLUMN col = { 0 };
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                L"member", &col)) && col.dwNumValues > 0) {
+            BOOL  bAnon = FALSE, bEveryone = FALSE, bAuthUsers = FALSE;
+            DWORD i;
+            for (i = 0; i < col.dwNumValues; i++) {
+                LPCWSTR dn;
+                if (col.pADsValues[i].dwType != ADSTYPE_CASE_IGNORE_STRING) continue;
+                dn = col.pADsValues[i].CaseIgnoreString;
+                if (wcsstr(dn, L"S-1-5-7"))  bAnon      = TRUE;   /* Anonymous Logon */
+                if (wcsstr(dn, L"S-1-1-0"))  bEveryone  = TRUE;   /* Everyone        */
+                if (wcsstr(dn, L"S-1-5-11")) bAuthUsers = TRUE;   /* Auth. Users     */
+            }
+            if (bAnon || bEveryone) {
+                pCheck->Status = POLICY_INSECURE;
+                StringCchCopyW(pCheck->wszGPOName, ARRAYSIZE(pCheck->wszGPOName),
+                    L"Pre-Windows 2000 Compatible Access");
+                StringCchPrintfW(pCheck->wszDetail, ARRAYSIZE(pCheck->wszDetail),
+                    L"contains %s%s%s - unauthenticated enumeration enabled",
+                    bAnon ? L"Anonymous Logon" : L"",
+                    (bAnon && bEveryone) ? L" + " : L"",
+                    bEveryone ? L"Everyone" : L"");
+            } else if (bAuthUsers) {
+                StringCchCopyW(pCheck->wszDetail, ARRAYSIZE(pCheck->wszDetail),
+                    L"contains Authenticated Users (broad legacy compat, but authenticated)");
+            }
+            pSearch->lpVtbl->FreeColumn(pSearch, &col);
+        }
+    }
+
+Cleanup:
+    if (hSearch) pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)  pSearch->lpVtbl->Release(pSearch);
+    return SUCCEEDED(hr) ? S_OK : hr;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Cleanup                                                                    */
 /* ─────────────────────────────────────────────────────────────────────────── */

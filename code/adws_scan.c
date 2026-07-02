@@ -103,6 +103,9 @@ static HRESULT ScanLAPSCoverage    (_In_z_ LPCWSTR pwszRootPath);
 _Must_inspect_result_
 static HRESULT ScanStaleComputers  (_In_z_ LPCWSTR pwszRootPath);
 
+_Must_inspect_result_
+static HRESULT ScanSensitiveDescriptions(_In_z_ LPCWSTR pwszRootPath);
+
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Public entry point                                                         */
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -130,35 +133,41 @@ HRESULT RunADWSScan(void)
 
     wprintf(L"\n[*] Domain root: %s\n\n", rootPath);
 
-    /* ── Run all five passive scans ───────────────────────────────────── */
+    /* ── Run all six passive scans ────────────────────────────────────── */
 
-    wprintf(L"[1/5] ADWS Endpoint Detection\n");
+    wprintf(L"[1/6] ADWS Endpoint Detection\n");
     if (FAILED(ScanADWSEndpoints(rootPath))) {
         wprintf(L"  [!] ScanADWSEndpoints failed.\n");
         hrFinal = E_FAIL;
     }
 
-    wprintf(L"\n[2/5] Computer Topology\n");
+    wprintf(L"\n[2/6] Computer Topology\n");
     if (FAILED(ScanComputerTopology(rootPath))) {
         wprintf(L"  [!] ScanComputerTopology failed.\n");
         hrFinal = E_FAIL;
     }
 
-    wprintf(L"\n[3/5] Delegation Risks\n");
+    wprintf(L"\n[3/6] Delegation Risks\n");
     if (FAILED(ScanDelegationRisks(rootPath))) {
         wprintf(L"  [!] ScanDelegationRisks failed.\n");
         hrFinal = E_FAIL;
     }
 
-    wprintf(L"\n[4/5] LAPS Coverage\n");
+    wprintf(L"\n[4/6] LAPS Coverage\n");
     if (FAILED(ScanLAPSCoverage(rootPath))) {
         wprintf(L"  [!] ScanLAPSCoverage failed.\n");
         hrFinal = E_FAIL;
     }
 
-    wprintf(L"\n[5/5] Stale Computers\n");
+    wprintf(L"\n[5/6] Stale Computers\n");
     if (FAILED(ScanStaleComputers(rootPath))) {
         wprintf(L"  [!] ScanStaleComputers failed.\n");
+        hrFinal = E_FAIL;
+    }
+
+    wprintf(L"\n[6/6] Sensitive Descriptions\n");
+    if (FAILED(ScanSensitiveDescriptions(rootPath))) {
+        wprintf(L"  [!] ScanSensitiveDescriptions failed.\n");
         hrFinal = E_FAIL;
     }
 
@@ -572,6 +581,11 @@ Cleanup:
 /*  Scan 4 — LAPS Coverage                                                    */
 /* ─────────────────────────────────────────────────────────────────────────── */
 
+/* A managed password normally expires within the policy window (LAPS default
+ * 30 days). An expiry pushed well beyond that means rotation was deliberately
+ * deferred — a persistence signal worth review. Heuristic; tune per policy.  */
+#define KESTREL_LAPS_SUPPRESS_DAYS  60
+
 _Must_inspect_result_
 static HRESULT
 ScanLAPSCoverage(_In_z_ LPCWSTR pwszRootPath)
@@ -580,14 +594,30 @@ ScanLAPSCoverage(_In_z_ LPCWSTR pwszRootPath)
     IDirectorySearch *pSearch    = NULL;
     ADS_SEARCH_HANDLE hSearch    = NULL;
     DWORD             cTotal     = 0;
+    DWORD             cDC        = 0;
     DWORD             cLegacy    = 0;
     DWORD             cModern    = 0;
     DWORD             cUnmanaged = 0;
+    DWORD             cDual      = 0;
+    DWORD             cExpired   = 0;
+    DWORD             cSuppress  = 0;
+    DWORD             cHealthy   = 0;
+    ULARGE_INTEGER    uliNow     = { 0 };
+    FILETIME          ftNow      = { 0 };
+    LONGLONG          llNow;
+    LONGLONG          llSuppress;
+
+    GetSystemTimeAsFileTime(&ftNow);
+    uliNow.LowPart  = ftNow.dwLowDateTime;
+    uliNow.HighPart = ftNow.dwHighDateTime;
+    llNow      = (LONGLONG)uliNow.QuadPart;
+    llSuppress = llNow + (LONGLONG)((ULONGLONG)KESTREL_LAPS_SUPPRESS_DAYS * KESTREL_FT_PER_DAY);
 
     LPWSTR attrs[] = {
         L"sAMAccountName",
-        L"ms-Mcs-AdmPwdExpirationTime",   /* Legacy LAPS          */
-        L"msLAPS-EncryptedPasswordHistory" /* Windows LAPS 2023+   */
+        L"userAccountControl",            /* exclude DCs (SERVER_TRUST_ACCOUNT) */
+        L"ms-Mcs-AdmPwdExpirationTime",   /* Legacy LAPS  — expiry (world-read) */
+        L"msLAPS-PasswordExpirationTime"  /* Windows LAPS — expiry (world-read) */
     };
 
     hr = KestrelBuildSearch(pwszRootPath, &pSearch);
@@ -600,15 +630,17 @@ ScanLAPSCoverage(_In_z_ LPCWSTR pwszRootPath)
 
     while (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
         ADS_SEARCH_COLUMN colName   = { 0 };
+        ADS_SEARCH_COLUMN colUAC    = { 0 };
         ADS_SEARCH_COLUMN colLegacy = { 0 };
         ADS_SEARCH_COLUMN colModern = { 0 };
 
-        BOOL bLegacy = FALSE;
-        BOOL bModern = FALSE;
+        LPCWSTR  pwszName = L"(unknown)";
+        DWORD    dwUAC    = 0;
+        LONGLONG llLegacy = 0;
+        LONGLONG llModern = 0;
 
         cTotal++;
 
-        LPCWSTR pwszName = L"(unknown)";
         if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
                         L"sAMAccountName", &colName)) &&
             colName.dwNumValues > 0 &&
@@ -616,27 +648,70 @@ ScanLAPSCoverage(_In_z_ LPCWSTR pwszRootPath)
             pwszName = colName.pADsValues[0].CaseIgnoreString;
 
         if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
-                        L"ms-Mcs-AdmPwdExpirationTime", &colLegacy)) &&
-            colLegacy.dwNumValues > 0)
-            bLegacy = TRUE;
+                        L"userAccountControl", &colUAC)) &&
+            colUAC.dwNumValues > 0 &&
+            colUAC.pADsValues[0].dwType == ADSTYPE_INTEGER)
+            dwUAC = colUAC.pADsValues[0].Integer;
 
         if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
-                        L"msLAPS-EncryptedPasswordHistory", &colModern)) &&
-            colModern.dwNumValues > 0)
-            bModern = TRUE;
+                        L"ms-Mcs-AdmPwdExpirationTime", &colLegacy)) &&
+            colLegacy.dwNumValues > 0 &&
+            colLegacy.pADsValues[0].dwType == ADSTYPE_LARGE_INTEGER)
+            llLegacy = colLegacy.pADsValues[0].LargeInteger.QuadPart;
 
-        if (bModern)       { cModern++;    wprintf(L"  %-40s  LAPS 2023+\n", pwszName); }
-        else if (bLegacy)  { cLegacy++;    wprintf(L"  %-40s  LAPS (legacy)\n", pwszName); }
-        else               { cUnmanaged++; wprintf(L"  %-40s  NOT MANAGED\n", pwszName); }
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                        L"msLAPS-PasswordExpirationTime", &colModern)) &&
+            colModern.dwNumValues > 0 &&
+            colModern.pADsValues[0].dwType == ADSTYPE_LARGE_INTEGER)
+            llModern = colModern.pADsValues[0].LargeInteger.QuadPart;
+
+        BOOL bIsDC   = (dwUAC & 0x2000) != 0;   /* SERVER_TRUST_ACCOUNT */
+        BOOL bLegacy = (llLegacy > 0);
+        BOOL bModern = (llModern > 0);
+
+        if (bIsDC) {
+            /* Domain controllers do not use LAPS — exclude from accounting. */
+            cDC++;
+            wprintf(L"  %-40s  (DC - skipped)\n", pwszName);
+        } else if (!bLegacy && !bModern) {
+            cUnmanaged++;
+            wprintf(L"  %-40s  NOT MANAGED\n", pwszName);
+        } else {
+            LONGLONG llExp = bModern ? llModern : llLegacy;   /* prefer Windows LAPS */
+            WCHAR    wszExp[32];
+
+            if (bModern) cModern++; else cLegacy++;
+            KestrelFileTimeToString(llExp, wszExp, ARRAYSIZE(wszExp));
+
+            if (bLegacy && bModern) {
+                cDual++;
+                wprintf(L"  %-40s  *** DUAL-SCHEMA (legacy + Windows LAPS) ***\n", pwszName);
+            } else if (llExp != 0 && llExp < llNow) {
+                cExpired++;
+                wprintf(L"  %-40s  *** EXPIRED (%s) - rotation stalled ***\n",
+                        pwszName, wszExp);
+            } else if (llExp > llSuppress) {
+                cSuppress++;
+                wprintf(L"  %-40s  *** FUTURE-DATED (%s) - rotation suppressed ***\n",
+                        pwszName, wszExp);
+            } else {
+                cHealthy++;
+                wprintf(L"  %-40s  %s\n", pwszName,
+                        bModern ? L"LAPS 2023+" : L"LAPS (legacy)");
+            }
+        }
 
         pSearch->lpVtbl->FreeColumn(pSearch, &colName);
+        pSearch->lpVtbl->FreeColumn(pSearch, &colUAC);
         pSearch->lpVtbl->FreeColumn(pSearch, &colLegacy);
         pSearch->lpVtbl->FreeColumn(pSearch, &colModern);
     }
 
-    wprintf(L"\n  [*] Total: %lu  |  LAPS 2023+: %lu  |  Legacy: %lu  |  Unmanaged: %lu (%.0f%%)\n",
-            cTotal, cModern, cLegacy, cUnmanaged,
-            cTotal ? (double)cUnmanaged / cTotal * 100.0 : 0.0);
+    wprintf(L"\n  [*] Computers: %lu  |  DCs skipped: %lu  |  Managed: %lu (Win LAPS %lu / legacy %lu)  |  Unmanaged: %lu (%.0f%%)\n",
+            cTotal, cDC, cModern + cLegacy, cModern, cLegacy, cUnmanaged,
+            (cTotal - cDC) ? (double)cUnmanaged / (cTotal - cDC) * 100.0 : 0.0);
+    wprintf(L"  [*] Health - expired: %lu  |  future-dated (suppressed): %lu  |  dual-schema: %lu  |  healthy: %lu\n",
+            cExpired, cSuppress, cDual, cHealthy);
 
 Cleanup:
     if (hSearch) pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
@@ -734,6 +809,185 @@ ScanStaleComputers(_In_z_ LPCWSTR pwszRootPath)
     wprintf(L"\n  [*] Stale (>%d days): %lu / %lu  (%.0f%%)\n",
             KESTREL_STALE_DAYS, cStale, cTotal,
             cTotal ? (double)cStale / cTotal * 100.0 : 0.0);
+
+Cleanup:
+    if (hSearch) pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)  pSearch->lpVtbl->Release(pSearch);
+    return hr;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  Sensitive descriptions — user description/info/comment leakage             */
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*
+ * The description, info ("Notes") and comment fields are readable by any
+ * authenticated user, and administrators routinely leave operationally
+ * devastating clues in them: role hints ("Domain Admin", "DCSync", "GMSA",
+ * "AS-REP roastable", "LAPS", "shadow credential") and — worse — literal
+ * passwords for service or break-glass accounts. This pass reads those fields
+ * for every user object and flags the ones that look sensitive so they can be
+ * sanitised. World-readable, ordinary-user, read-only: same footprint as the
+ * rest of the module. Findings are printed (like GPP cpassword) because showing
+ * the value proves the exposure and forces remediation.
+ */
+
+/* Role / weakness hints that map an account to a privileged role or a weakness. */
+static const WCHAR *g_rgRoleHints[] = {
+    L"domain admin", L"enterprise admin", L"schema admin", L"dcsync",
+    L"dc sync", L"kerberoast", L"roasting", L"as-rep", L"asrep",
+    L"shadow cred", L"shadow credential", L"unconstrained", L"golden",
+    L"pass the", L"gmsa", L"laps", L"backdoor", L"privileged"
+};
+
+/* Explicit credential markers. */
+static const WCHAR *g_rgCredHints[] = {
+    L"password", L"passwd", L"pwd", L"pass:", L"pw:", L"pw=",
+    L"creds", L"credential", L"secret", L"login:"
+};
+
+/* Case-insensitive substring search (no shlwapi dependency). */
+static BOOL _ContainsI(_In_z_ LPCWSTR hay, _In_z_ LPCWSTR needle)
+{
+    size_t n = wcslen(needle);
+    for (const WCHAR *p = hay; *p; p++)
+        if (_wcsnicmp(p, needle, n) == 0)
+            return TRUE;
+    return FALSE;
+}
+
+/* Whitespace-delimited token that looks like a password: length >= 8 with a
+ * mix of lower, upper and digit. Tokens carrying @ = , \ (emails/DNs/UPNs) are
+ * skipped to keep the heuristic quiet. */
+static BOOL _LooksLikePassword(_In_z_ LPCWSTR pwszText)
+{
+    const WCHAR *p = pwszText;
+    while (*p) {
+        BOOL   bLower = FALSE, bUpper = FALSE, bDigit = FALSE, bStructural = FALSE;
+        size_t len = 0;
+        while (*p == L' ' || *p == L'\t')
+            p++;
+        while (*p && *p != L' ' && *p != L'\t') {
+            if      (*p >= L'a' && *p <= L'z') bLower = TRUE;
+            else if (*p >= L'A' && *p <= L'Z') bUpper = TRUE;
+            else if (*p >= L'0' && *p <= L'9') bDigit = TRUE;
+            else if (*p == L'@' || *p == L'=' || *p == L',' || *p == L'\\')
+                bStructural = TRUE;
+            len++; p++;
+        }
+        if (len >= 8 && bLower && bUpper && bDigit && !bStructural)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Classify one field; on hit, fill a short reason and return TRUE. */
+static BOOL _DescIsSensitive(_In_z_ LPCWSTR pwszText,
+                             _Out_writes_z_(cchReason) LPWSTR pwszReason,
+                             _In_ size_t cchReason)
+{
+    size_t i;
+
+    if (!pwszText || !pwszText[0])
+        return FALSE;
+
+    for (i = 0; i < ARRAYSIZE(g_rgCredHints); i++)
+        if (_ContainsI(pwszText, g_rgCredHints[i])) {
+            StringCchPrintfW(pwszReason, cchReason, L"credential kw '%s'", g_rgCredHints[i]);
+            return TRUE;
+        }
+    for (i = 0; i < ARRAYSIZE(g_rgRoleHints); i++)
+        if (_ContainsI(pwszText, g_rgRoleHints[i])) {
+            StringCchPrintfW(pwszReason, cchReason, L"role hint '%s'", g_rgRoleHints[i]);
+            return TRUE;
+        }
+    if (_LooksLikePassword(pwszText)) {
+        StringCchCopyW(pwszReason, cchReason, L"password-like token");
+        return TRUE;
+    }
+    return FALSE;
+}
+
+_Must_inspect_result_
+static HRESULT
+ScanSensitiveDescriptions(_In_z_ LPCWSTR pwszRootPath)
+{
+    HRESULT           hr       = S_OK;
+    IDirectorySearch *pSearch  = NULL;
+    ADS_SEARCH_HANDLE hSearch  = NULL;
+    DWORD             cUsers   = 0;
+    DWORD             cFlagged = 0;
+
+    LPWSTR attrs[] = {
+        L"sAMAccountName",
+        L"description",
+        L"info",          /* the AD "Notes" field */
+        L"comment"
+    };
+
+    hr = KestrelBuildSearch(pwszRootPath, &pSearch);
+    if (FAILED(hr)) return hr;
+
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+            L"(&(objectCategory=person)(objectClass=user))",
+            attrs, ARRAYSIZE(attrs), &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    wprintf(L"  %-28s %-8s %-26s %s\n",
+            L"Account", L"Field", L"Reason", L"Content");
+    wprintf(L"  %s\n",
+            L"----------------------------------------------------------------------");
+
+    while (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+        ADS_SEARCH_COLUMN colName = { 0 };
+        ADS_SEARCH_COLUMN colDesc = { 0 };
+        ADS_SEARCH_COLUMN colInfo = { 0 };
+        ADS_SEARCH_COLUMN colCmt  = { 0 };
+        LPCWSTR pwszName = L"(unknown)";
+        int     f;
+
+        struct { LPCWSTR label; ADS_SEARCH_COLUMN *pc; } fields[3];
+
+        cUsers++;
+
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                        L"sAMAccountName", &colName)) &&
+            colName.dwNumValues > 0 &&
+            colName.pADsValues[0].dwType == ADSTYPE_CASE_IGNORE_STRING)
+            pwszName = colName.pADsValues[0].CaseIgnoreString;
+
+        (void)pSearch->lpVtbl->GetColumn(pSearch, hSearch, L"description", &colDesc);
+        (void)pSearch->lpVtbl->GetColumn(pSearch, hSearch, L"info",        &colInfo);
+        (void)pSearch->lpVtbl->GetColumn(pSearch, hSearch, L"comment",     &colCmt);
+
+        fields[0].label = L"desc";    fields[0].pc = &colDesc;
+        fields[1].label = L"info";    fields[1].pc = &colInfo;
+        fields[2].label = L"comment"; fields[2].pc = &colCmt;
+
+        for (f = 0; f < 3; f++) {
+            ADS_SEARCH_COLUMN *pc = fields[f].pc;
+            if (pc->dwNumValues > 0 &&
+                pc->pADsValues[0].dwType == ADSTYPE_CASE_IGNORE_STRING) {
+                LPCWSTR val = pc->pADsValues[0].CaseIgnoreString;
+                WCHAR   wszReason[64];
+                if (val && val[0] &&
+                    _DescIsSensitive(val, wszReason, ARRAYSIZE(wszReason))) {
+                    WCHAR wszClip[80];
+                    StringCchCopyNW(wszClip, ARRAYSIZE(wszClip), val, 72);
+                    wprintf(L"  %-28s %-8s %-26s %s\n",
+                            pwszName, fields[f].label, wszReason, wszClip);
+                    cFlagged++;
+                }
+            }
+        }
+
+        pSearch->lpVtbl->FreeColumn(pSearch, &colName);
+        pSearch->lpVtbl->FreeColumn(pSearch, &colDesc);
+        pSearch->lpVtbl->FreeColumn(pSearch, &colInfo);
+        pSearch->lpVtbl->FreeColumn(pSearch, &colCmt);
+    }
+
+    wprintf(L"\n  [*] Users scanned: %lu  |  Sensitive fields flagged: %lu\n",
+            cUsers, cFlagged);
 
 Cleanup:
     if (hSearch) pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);

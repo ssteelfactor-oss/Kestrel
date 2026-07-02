@@ -78,7 +78,7 @@ Kestrel.exe --help
 | `--adws`       | ADWS endpoint detection                                      |
 | `--topology`   | Computer topology via SPN                                    |
 | `--delegation` | Delegation risks                                             |
-| `--laps`       | LAPS coverage                                                |
+| `--laps`       | LAPS coverage + health anomalies                            |
 | `--stale`      | Stale computers                                              |
 | `--acl`        | ACL edge extraction                                          |
 | `--groups`     | Transitive group membership                                  |
@@ -97,7 +97,7 @@ With no module flags, Kestrel runs everything.
 
 ## Modules
 
-### v0.1 Five passive scans (`adws_scan.c`)
+### v0.1 Six passive scans (`adws_scan.c`)
 
 All queries are read-only. Zero packets sent to target hosts.
 
@@ -106,8 +106,9 @@ All queries are read-only. Zero packets sent to target hosts.
 | **ADWS Endpoint Detection** | Probes port 9389/TCP per DC. Raw TCP connect, SO\_ERROR verification, no WCF framing.                                                                                                                                        |
 | **Computer Topology**       | Full computer inventory with SPN-based service inference. MSSQLSvc → SQL Server, WSMAN → WinRM, TERMSRV → RDP. One LDAP query covers the entire domain.                                                                      |
 | **Delegation Risks**        | Separates three categories: unconstrained delegation (TGT forwarding), constrained delegation (msDS-AllowedToDelegateTo), and Protocol Transition / S4U2Self (UAC 0x1000000). Reported separately - different risk profiles. |
-| **LAPS Coverage**           | Detects legacy LAPS (ms-Mcs-AdmPwdExpirationTime) and Windows LAPS 2023+ (msLAPS-EncryptedPasswordHistory). Splits computer population into managed/unmanaged with percentage breakdown.                                     |
+| **LAPS Health**             | Reads only the expiration timestamps (world-readable — not the password) for legacy and Windows LAPS. Beyond managed/unmanaged coverage it flags anomalies: expired (rotation stalled), future-dated (rotation suppressed — a persistence signal), dual-schema, and never-managed. DCs excluded.                     |
 | **Stale Computers**         | Uses lastLogonTimestamp as primary reference - it replicates across DCs, unlike lastLogon which is per-DC only. Both values reported side by side.                                                                           |
+| **Sensitive Descriptions**  | Reads user `description` / `info` / `comment` (world-readable) and flags leaked secrets and role/weakness hints — passwords, "Domain Admin", "DCSync", "GMSA", "LAPS", "shadow credential". Admins routinely annotate accounts with their own weaknesses.                                                                  |
 
 ### v0.2 ACL edge extraction (`KestrelACL.c`)
 
@@ -175,6 +176,10 @@ The one module that steps outside LDAP (see *Footprint*). GPO settings live on S
 
 It also flags the **Onelogon** (WOOT'26) surface — the *Allow vulnerable Netlogon secure channel connections* allow-list, i.e. accounts permitted to use unsigned/unsealed Netlogon channels (the compatibility hole left by the 2020 Zerologon patch). Each GPO's `GptTmpl.inf` is read and its `VulnerableChannelAllowList` SDDL decoded into the exempted principals. Domain-GPO scope only — an allow-list written directly to a DC's local registry would need remote-registry RPC, which Kestrel does not do.
 
+**SMB signing** is checked from each GPO's `GptTmpl.inf` (`RequireSecuritySignature`, server and client) — the control that blocks the NTLM relay/reflection class (CVE-2025-33073, CVE-2026-24294). Server-side drives the verdict; when it isn't defined the result is `UNKNOWN`, since the OS default applies and member servers / Server 2025 do not require it by default.
+
+**Anonymous LDAP posture** is read straight from the directory: `dSHeuristics` (7th character, `fLDAPBlockAnonOps`) reveals whether anonymous LDAP bind/search is enabled, and the **Pre-Windows 2000 Compatible Access** group is inspected for Anonymous Logon / Everyone members — either one reopens the pre-credential enumeration surface.
+
 ### v0.6 Roastable accounts (`KestrelRoast.c`)
 
 - **Kerberoastable** - user accounts carrying an SPN (krbtgt excluded).
@@ -227,7 +232,7 @@ Not a scan but a filter for the ACL module. It builds a baseline of "expected" A
 | v0.6    | ✅      | Kerberoastable + AS-REP Roastable detection                                 |
 | v0.7    | ✅      | Trust posture · gMSA password readers · ADCS ESC1-5/9 · GPP cpassword       |
 | v0.8    | ✅      | Default-ACL baseline (delegation noise suppression) · Onelogon detection    |
-| -       | 🔲      | LAPS coverage/health anomalies (expiry-based, incl. rotation suppression)   |
+| v0.9    | ✅      | LAPS health anomalies · SMB signing (NTLM relay) · Anonymous LDAP posture · description leak scan |
 | -       | 🔲      | `ms-DS-MachineAccountQuota` + RBCD weaponizability enrichment               |
 | -       | 🔲      | Trust / ADCS edges in the graph + report                                    |
 | -       | 🔲      | ADExplorer snapshot as an offline input source (diff over time)             |
