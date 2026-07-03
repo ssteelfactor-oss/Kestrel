@@ -359,7 +359,10 @@ int wmain(int argc, wchar_t *argv[])
         KTRACE(L"v0.2 complete — edges: %lu", pACL ? pACL->cEdges : 0);
         wprintf(L"\n═══ Kestrel — DCSync Rights Analysis ═══\n\n");
         DWORD cDCSync = KestrelAnalyzeDCSync(pACL);
-        KTRACE(L"DCSync analysis complete — critical principals: %lu", cDCSync);
+        KTRACE(L"DCSync analysis complete — critical principals: %lu\n", cDCSync);
+        wprintf(L"\n═══ Kestrel — MAQ + RBCD Weaponizability ═══\n\n");
+        DWORD cRbcd = KestrelAnalyzeRbcdWeaponizable(pACL, wszDomainNC);
+        KTRACE(L"RBCD analysis complete — write-on-computer paths: %lu", cRbcd);
     }
 
     /* ── v0.3: transitive group membership ───────────────────────── */

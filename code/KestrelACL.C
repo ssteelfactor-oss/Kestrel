@@ -2062,3 +2062,121 @@ DWORD KestrelAnalyzeDCSync(
     wprintf(L"\n");
     return cCritical;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  MAQ + RBCD weaponizability
+ *
+ *  ms-DS-MachineAccountQuota (default 10) lets any authenticated user create
+ *  machine accounts. A write on a computer object (GenericAll/GenericWrite/
+ *  WriteDacl/WriteOwner, or a write of the RBCD property) lets a principal set
+ *  msDS-AllowedToActOnBehalfOfOtherIdentity; combined with MAQ>0 the attacker
+ *  can also *mint* the service account with an SPN needed to finish S4U2Proxy —
+ *  so such a path is weaponizable now, not merely in theory.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+ /* msDS-AllowedToActOnBehalfOfOtherIdentity schemaIDGUID = 3f78c3e5-... */
+static BOOL _RbcdGuidMatch(_In_z_ LPCWSTR pwszGuid)
+{
+    return (wcsstr(pwszGuid, L"3f78c3e5") != NULL) ||
+        (wcsstr(pwszGuid, L"3F78C3E5") != NULL);
+}
+
+_Must_inspect_result_
+HRESULT KestrelReadMachineAccountQuota(
+    _In_z_ LPCWSTR pwszDomainNC,
+    _Out_  DWORD* pdwMAQ)
+{
+    HRESULT             hr;
+    IDirectorySearch* pSearch = 0;
+    ADS_SEARCH_HANDLE   hSearch = 0;
+    WCHAR               wszPath[512];
+    ADS_SEARCHPREF_INFO prefs[1];
+    LPWSTR              attrs[] = { L"ms-DS-MachineAccountQuota" };
+
+    if (!pwszDomainNC || !pdwMAQ) return E_INVALIDARG;
+    *pdwMAQ = 10;   /* schema default when the attribute is unset */
+
+    hr = StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszDomainNC);
+    if (FAILED(hr)) return hr;
+
+    hr = ADsGetObject(wszPath, &IID_IDirectorySearch, (void**)&pSearch);
+    if (FAILED(hr)) return hr;
+
+    prefs[0].dwSearchPref = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_BASE;
+    pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 1);
+
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+        L"(objectClass=*)", attrs, ARRAYSIZE(attrs), &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    if (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+        ADS_SEARCH_COLUMN col = { 0 };
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+            L"ms-DS-MachineAccountQuota", &col)) &&
+            col.dwNumValues > 0 &&
+            col.pADsValues[0].dwType == ADSTYPE_INTEGER) {
+            *pdwMAQ = col.pADsValues[0].Integer;
+            pSearch->lpVtbl->FreeColumn(pSearch, &col);
+        }
+    }
+
+Cleanup:
+    if (hSearch) pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)  pSearch->lpVtbl->Release(pSearch);
+    return S_OK;   /* soft: on any miss we keep the schema default */
+}
+
+_Must_inspect_result_
+DWORD KestrelAnalyzeRbcdWeaponizable(
+    _In_opt_ const KESTREL_ACL_SCAN_RESULT* pACL,
+    _In_z_   LPCWSTR                        pwszDomainNC)
+{
+    DWORD dwMAQ = 10;
+    DWORD cWeap = 0;
+
+    (void)KestrelReadMachineAccountQuota(pwszDomainNC, &dwMAQ);
+
+    if (dwMAQ == 0)
+        wprintf(L"  Machine Account Quota: 0 - ordinary users cannot create "
+            L"machine accounts (good)\n\n");
+    else
+        wprintf(L"  Machine Account Quota: %lu - any authenticated user can "
+            L"create up to %lu machine account(s)\n\n", dwMAQ, dwMAQ);
+
+    if (!pACL || pACL->cEdges == 0) {
+        wprintf(L"  [i] No ACL data - run with --acl to surface RBCD-weaponizable "
+            L"write paths\n\n");
+        return 0;
+    }
+
+    for (DWORD i = 0; i < pACL->cEdges; i++) {
+        const KESTREL_ACL_EDGE* pE = &pACL->rgEdges[i];
+        BOOL bWrite;
+
+        if (pE->bDeny) continue;
+        if (_wcsicmp(pE->wszObjectClass, L"computer") != 0) continue;
+
+        bWrite = (pE->EdgeType == EDGE_GENERIC_ALL ||
+            pE->EdgeType == EDGE_GENERIC_WRITE ||
+            pE->EdgeType == EDGE_WRITE_DACL ||
+            pE->EdgeType == EDGE_WRITE_OWNER);
+        if (!bWrite && pE->EdgeType == EDGE_WRITE_PROPERTY &&
+            (pE->wszRightGuid[0] == L'\0' || _RbcdGuidMatch(pE->wszRightGuid)))
+            bWrite = TRUE;
+        if (!bWrite) continue;
+
+        cWeap++;
+        wprintf(L"  %-46s %-16s %s\n      -> %s\n",
+            pE->wszTrusteeSid, pE->wszRightName,
+            dwMAQ > 0 ? L"*** RBCD-WEAPONIZABLE NOW ***"
+            : L"(RBCD-capable; MAQ=0 needs an existing SPN account)",
+            pE->wszTargetDN);
+    }
+
+    wprintf(L"\n  [*] Write-on-computer paths: %lu  |  %s\n\n", cWeap,
+        dwMAQ > 0 ? L"all weaponizable now (MAQ>0)"
+        : L"none immediately weaponizable (MAQ=0)");
+    return cWeap;
+}

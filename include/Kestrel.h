@@ -497,6 +497,18 @@ DWORD KestrelAnalyzeDCSync(
  * KestrelBaseline.c — v0.8
  * ════════════════════════════════════════════════════════════════════════════ */
 
+
+_Must_inspect_result_
+HRESULT KestrelReadMachineAccountQuota(
+    _In_z_ LPCWSTR pwszDomainNC,
+    _Out_  DWORD* pdwMAQ);
+
+_Must_inspect_result_
+DWORD KestrelAnalyzeRbcdWeaponizable(
+    _In_opt_ const KESTREL_ACL_SCAN_RESULT* pACL,
+    _In_z_   LPCWSTR                        pwszDomainNC);
+
+
 _Must_inspect_result_
 HRESULT KestrelBuildACLBaseline(
     _Outptr_ KESTREL_ACL_BASELINE **ppBaseline);
