@@ -19,23 +19,26 @@
 
 typedef struct _KESTREL_HV_GROUP {
     DWORD   dwRID;
+    BOOL    bBuiltin;   /* TRUE = S-1-5-32-<RID> alias; FALSE = <domain>-<RID> */
     LPCWSTR pwszLabel;
 } KESTREL_HV_GROUP;
 
 static const KESTREL_HV_GROUP g_rgHighValueGroups[] = {
-    { 512, L"Domain Admins"                    },
-    { 516, L"Domain Controllers"               },
-    { 518, L"Schema Admins"                    },
-    { 519, L"Enterprise Admins"                },
-    { 520, L"Group Policy Creator Owners"      },
-    { 521, L"Read-only Domain Controllers"     },
-    { 522, L"Cloneable Domain Controllers"     },
-    { 526, L"Key Admins"                       },
-    { 527, L"Enterprise Key Admins"            },
-    { 548, L"Account Operators"                },
-    { 549, L"Server Operators"                 },
-    { 550, L"Print Operators"                  },
-    { 551, L"Backup Operators"                 },
+    { 512, FALSE, L"Domain Admins"                },
+    { 516, FALSE, L"Domain Controllers"           },
+    { 518, FALSE, L"Schema Admins"                },
+    { 519, FALSE, L"Enterprise Admins"            },
+    { 520, FALSE, L"Group Policy Creator Owners"  },
+    { 521, FALSE, L"Read-only Domain Controllers" },
+    { 522, FALSE, L"Cloneable Domain Controllers" },
+    { 526, FALSE, L"Key Admins"                   },
+    { 527, FALSE, L"Enterprise Key Admins"        },
+    { 544, TRUE,  L"Administrators"               },
+    { 548, TRUE,  L"Account Operators"            },
+    { 549, TRUE,  L"Server Operators"             },
+    { 550, TRUE,  L"Print Operators"              },
+    { 551, TRUE,  L"Backup Operators"             },
+    { 578, TRUE,  L"Hyper-V Administrators"       },
 };
 #define KESTREL_HV_GROUP_COUNT \
     (sizeof(g_rgHighValueGroups) / sizeof(g_rgHighValueGroups[0]))
@@ -250,6 +253,27 @@ KestrelBuildGroupSid(
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
+/*  KestrelBuildBuiltinSid — S-1-5-32-<RID> (BUILTIN alias, e.g. Backup Ops)   */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+_Must_inspect_result_
+static HRESULT
+KestrelBuildBuiltinSid(
+    _In_     DWORD  dwRID,
+    _Outptr_ PSID  *ppSid)
+{
+    SID_IDENTIFIER_AUTHORITY nt = SECURITY_NT_AUTHORITY;
+
+    if (!ppSid) return E_INVALIDARG;
+    *ppSid = NULL;
+
+    if (!AllocateAndInitializeSid(&nt, 2,
+            SECURITY_BUILTIN_DOMAIN_RID, dwRID, 0, 0, 0, 0, 0, 0, ppSid))
+        return HRESULT_FROM_WIN32(GetLastError());
+    return S_OK;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
 /*  KestrelSidToLdapFilter                                                     */
 /* ─────────────────────────────────────────────────────────────────────────── */
 
@@ -392,6 +416,91 @@ Cleanup:
         pSearch->lpVtbl->Release(pSearch);
 
     KTRACE(L" KestrelGetGroupDNBySid exit: hr=0x%08X found=%d\n", hr, bFound);
+    return hr;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  KestrelGetGroupDNByName — locate a group by sAMAccountName (no fixed RID,   */
+/*  e.g. DnsAdmins, DHCP Administrators)                                        */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+_Must_inspect_result_
+static HRESULT
+KestrelGetGroupDNByName(
+    _In_z_                   LPCWSTR pwszRootPath,
+    _In_z_                   LPCWSTR pwszName,
+    _Out_writes_z_(cchDNBuf) LPWSTR  pwszDNBuf,
+    _In_                     SIZE_T  cchDNBuf,
+    _Out_writes_z_(cchSAM)   LPWSTR  pwszSAMBuf,
+    _In_                     SIZE_T  cchSAM)
+{
+    HRESULT           hr = S_OK;
+    IDirectorySearch* pSearch = NULL;
+    ADS_SEARCH_HANDLE hSearch = NULL;
+    WCHAR             wszFilter[300];
+    BOOL              bFound = FALSE;
+
+    if (!pwszRootPath || !pwszName || !pwszDNBuf || !pwszSAMBuf)
+        return E_INVALIDARG;
+
+    pwszDNBuf[0] = L'\0';
+    pwszSAMBuf[0] = L'\0';
+
+    hr = StringCchPrintfW(wszFilter, ARRAYSIZE(wszFilter),
+        L"(&(objectClass=group)(sAMAccountName=%s))", pwszName);
+    if (FAILED(hr)) return hr;
+
+    hr = ADsGetObject(pwszRootPath, &IID_IDirectorySearch, (void**)&pSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    ADS_SEARCHPREF_INFO prefs[2];
+    prefs[0].dwSearchPref = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_SUBTREE;
+    prefs[1].dwSearchPref = ADS_SEARCHPREF_PAGESIZE;
+    prefs[1].vValue.dwType = ADSTYPE_INTEGER;
+    prefs[1].vValue.Integer = KESTREL_LDAP_PAGESIZE;
+
+    hr = pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 2);
+    if (FAILED(hr)) goto Cleanup;
+
+    LPWSTR attrs[] = { L"distinguishedName", L"sAMAccountName" };
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+        wszFilter, attrs, ARRAYSIZE(attrs), &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    if (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+        ADS_SEARCH_COLUMN colDN = { 0 };
+        ADS_SEARCH_COLUMN colSAM = { 0 };
+
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+            L"distinguishedName", &colDN)) &&
+            colDN.dwNumValues > 0 &&
+            colDN.pADsValues[0].dwType == ADSTYPE_DN_STRING) {
+            StringCchCopyW(pwszDNBuf, cchDNBuf, colDN.pADsValues[0].DNString);
+            bFound = TRUE;
+        }
+
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+            L"sAMAccountName", &colSAM)) &&
+            colSAM.dwNumValues > 0 &&
+            colSAM.pADsValues[0].dwType == ADSTYPE_CASE_IGNORE_STRING) {
+            StringCchCopyW(pwszSAMBuf, cchSAM,
+                colSAM.pADsValues[0].CaseIgnoreString);
+        }
+
+        pSearch->lpVtbl->FreeColumn(pSearch, &colDN);
+        pSearch->lpVtbl->FreeColumn(pSearch, &colSAM);
+    }
+
+    if (!bFound)
+        hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+
+Cleanup:
+    if (hSearch && pSearch)
+        pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)
+        pSearch->lpVtbl->Release(pSearch);
     return hr;
 }
 
@@ -735,7 +844,9 @@ KestrelRunGroupScan(
         WCHAR wszDN[512] = { 0 };
         WCHAR wszSAM[128] = { 0 };
 
-        HRESULT hrGroup = KestrelBuildGroupSid(pDomainSid, dwRID, &pGroupSid);
+        HRESULT hrGroup = g_rgHighValueGroups[i].bBuiltin
+            ? KestrelBuildBuiltinSid(dwRID, &pGroupSid)
+            : KestrelBuildGroupSid(pDomainSid, dwRID, &pGroupSid);
         if (FAILED(hrGroup)) {
             KTRACE(L" BuildGroupSid failed: 0x%08X\n", hrGroup);
             pRes->cErrors++;
@@ -784,6 +895,37 @@ KestrelRunGroupScan(
         *ppTail = pGroup;
         ppTail = &pGroup->pNext;
         pRes->cGroups++;
+    }
+
+    /* ── 2b. Named high-value groups without a fixed RID ─────────────── */
+    {
+        static const LPCWSTR g_rgNamedHVGroups[] = {
+            L"DnsAdmins", L"DHCP Administrators"
+        };
+        for (SIZE_T i = 0; i < ARRAYSIZE(g_rgNamedHVGroups); i++) {
+            LPCWSTR pwszNm  = g_rgNamedHVGroups[i];
+            WCHAR   wszDN[512]  = { 0 };
+            WCHAR   wszSAM[128] = { 0 };
+            KESTREL_GROUP_RESULT* pGroup = NULL;
+
+            HRESULT hrN = KestrelGetGroupDNByName(pwszRootPath, pwszNm,
+                wszDN, ARRAYSIZE(wszDN), wszSAM, ARRAYSIZE(wszSAM));
+            if (hrN == HRESULT_FROM_WIN32(ERROR_NOT_FOUND))
+                continue;                       /* group not present in domain */
+            if (FAILED(hrN)) { pRes->cErrors++; continue; }
+
+            hrN = KestrelTransitiveMembership(pwszRootPath, wszDN,
+                wszSAM[0] ? wszSAM : pwszNm, &pGroup);
+            if (FAILED(hrN) || !pGroup) { pRes->cErrors++; continue; }
+
+            wprintf(L"  %-40s %-32s %-10lu %lu\n",
+                pwszNm, wszSAM[0] ? wszSAM : pwszNm,
+                pGroup->cMembers, pGroup->cEnabled);
+
+            *ppTail = pGroup;
+            ppTail = &pGroup->pNext;
+            pRes->cGroups++;
+        }
     }
 
     wprintf(L"\n  [*] Groups scanned: %lu  |  Errors: %lu\n",
@@ -840,4 +982,4 @@ KestrelFreeGroupScanResult(
         p = pNext;
     }
     HeapFree(GetProcessHeap(), 0, pResult);
-}
+}

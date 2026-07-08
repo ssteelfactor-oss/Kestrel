@@ -98,6 +98,7 @@ typedef struct _KESTREL_POLICY_RESULT {
     KESTREL_POLICY_CHECK  SMBSigning;
     KESTREL_POLICY_CHECK  AnonymousLDAP;
     KESTREL_POLICY_CHECK  PreWin2000;
+    KESTREL_POLICY_CHECK  DangerousRights;
     DWORD                 cInsecure;    /* total insecure findings  */
     DWORD                 cUnknown;     /* total unknown            */
     DWORD                 cGPOsScanned;
@@ -221,6 +222,15 @@ KestrelCheckPreWin2000(
     _In_z_  LPCWSTR               pwszDomainNC,
     _Inout_ KESTREL_POLICY_CHECK *pCheck);
 
+/*
+ * Dangerous User Rights Assignment: DA-equivalent privileges (SeBackup, SeDebug,
+ * SeTakeOwnership, ...) granted to domain principals via a GPO security template.
+ */
+static VOID
+KestrelCheckDangerousRights(
+    _In_z_  LPCWSTR               pwszGpoPath,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck);
+
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Public entry point                                                         */
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -330,6 +340,17 @@ KestrelRunPolicyAudit(
         ARRAYSIZE(pResult->PreWin2000.wszDetail),
         L"No Anonymous Logon / Everyone members");
 
+    KestrelInitCheck(&pResult->DangerousRights,
+        L"User Rights",
+        L"DA-equivalent privileges (SeBackup/SeRestore/SeDebug/SeTakeOwnership/"
+        L"SeImpersonate/SeLoadDriver/SeTcb) granted to domain principals via GPO",
+        L"Assign these rights only to built-in holders; remove domain users/groups "
+        L"from the [Privilege Rights] section");
+    pResult->DangerousRights.Status = POLICY_SECURE;   /* no domain grants by default */
+    StringCchCopyW(pResult->DangerousRights.wszDetail,
+        ARRAYSIZE(pResult->DangerousRights.wszDetail),
+        L"No DA-equivalent privileges granted to domain principals");
+
     /* ── Enumerate GPOs from AD ──────────────────────────────────── */
     wprintf(L"  [*] Enumerating GPOs...\n");
     hr = KestrelEnumGPOs(pwszDomainNC, &rgPaths, &cPaths);
@@ -438,6 +459,10 @@ KestrelRunPolicyAudit(
         if (pResult->SMBSigning.Status != POLICY_SECURE)
             KestrelCheckSMBSigning(rgPaths[i], &pResult->SMBSigning);
 
+        /* Dangerous User Rights Assignment (GptTmpl.inf [Privilege Rights]) */
+        if (pResult->DangerousRights.Status != POLICY_INSECURE)
+            KestrelCheckDangerousRights(rgPaths[i], &pResult->DangerousRights);
+
         KestrelFreePolEntries(pEntries);
     }
 
@@ -460,7 +485,8 @@ KestrelRunPolicyAudit(
     KESTREL_POLICY_CHECK *rgChecks[] = {
         &pResult->LLMNR, &pResult->NBTNS, &pResult->WDigest,
         &pResult->NTLMv1, &pResult->LDAPSigning, &pResult->NetlogonAllowList,
-        &pResult->SMBSigning, &pResult->AnonymousLDAP, &pResult->PreWin2000
+        &pResult->SMBSigning, &pResult->AnonymousLDAP, &pResult->PreWin2000,
+        &pResult->DangerousRights
     };
 
     wprintf(L"  %-20s %-10s %s\n", L"Check", L"Status", L"Detail");
@@ -589,6 +615,83 @@ _GptTmplGetDword(_In_z_ LPCWSTR pwszText, _In_z_ LPCWSTR pwszKey, _Out_ DWORD *p
         }
     }
     return FALSE;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ *  KestrelCheckDangerousRights — User Rights Assignment abuse
+ *
+ *  The [Privilege Rights] section of a GPO security template grants Windows
+ *  privileges to principals. Several are DA-equivalent by design: SeBackup /
+ *  SeRestore read past every ACL (ntds.dit dump), SeDebug reaches LSASS, and
+ *  SeTakeOwnership / SeLoadDriver / SeTcb / SeImpersonate / SeCreateToken all
+ *  lead to SYSTEM. When any is granted to a *domain* principal (S-1-5-21-...)
+ *  rather than only built-in holders, an ordinary account wields effective
+ *  domain-admin power — a path attack-graph tools usually miss, because it is a
+ *  privilege, not an ACE. Same footprint (SMB read of SYSVOL), GPO scope only.
+ * ─────────────────────────────────────────────────────────────────────────── */
+static const WCHAR *g_rgDangerousRights[] = {
+    L"SeBackupPrivilege",         L"SeRestorePrivilege",
+    L"SeDebugPrivilege",          L"SeTakeOwnershipPrivilege",
+    L"SeImpersonatePrivilege",    L"SeAssignPrimaryTokenPrivilege",
+    L"SeLoadDriverPrivilege",     L"SeTcbPrivilege",
+    L"SeCreateTokenPrivilege",    L"SeManageVolumePrivilege"
+};
+
+static VOID
+KestrelCheckDangerousRights(
+    _In_z_  LPCWSTR               pwszGpoPath,
+    _Inout_ KESTREL_POLICY_CHECK *pCheck)
+{
+    WCHAR *pwszText = KestrelReadGptTmpl(pwszGpoPath);
+    WCHAR  wszHits[384] = { 0 };
+    DWORD  cHits = 0;
+    size_t i;
+
+    if (!pwszText)
+        return;
+
+    for (i = 0; i < ARRAYSIZE(g_rgDangerousRights); i++) {
+        LPCWSTR      priv    = g_rgDangerousRights[i];
+        size_t       cchPriv = wcslen(priv);
+        const WCHAR *p;
+
+        for (p = pwszText; *p; p++) {
+            const WCHAR *q, *pEol, *r;
+
+            if (_wcsnicmp(p, priv, cchPriv) != 0)
+                continue;
+
+            /* the name must be a key: next non-space char is '=' */
+            q = p + cchPriv;
+            while (*q == L' ' || *q == L'\t') q++;
+            if (*q != L'=')
+                continue;                 /* substring inside another token */
+
+            /* scan the value (to end-of-line) for a domain SID */
+            pEol = q;
+            while (*pEol && *pEol != L'\r' && *pEol != L'\n') pEol++;
+            for (r = q; r < pEol; r++) {
+                if (_wcsnicmp(r, L"S-1-5-21-", 9) == 0) {
+                    if (wszHits[0])
+                        StringCchCatW(wszHits, ARRAYSIZE(wszHits), L", ");
+                    StringCchCatW(wszHits, ARRAYSIZE(wszHits), priv);
+                    cHits++;
+                    break;                /* one hit per privilege is enough */
+                }
+            }
+            break;                        /* found the key line for this privilege */
+        }
+    }
+
+    if (cHits > 0) {
+        pCheck->Status = POLICY_INSECURE;
+        StringCchCopyW(pCheck->wszGPOName, ARRAYSIZE(pCheck->wszGPOName), pwszGpoPath);
+        StringCchPrintfW(pCheck->wszDetail, ARRAYSIZE(pCheck->wszDetail),
+            L"%lu DA-equivalent privilege(s) to domain principals: %s",
+            cHits, wszHits);
+    }
+
+    HeapFree(GetProcessHeap(), 0, pwszText);
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
