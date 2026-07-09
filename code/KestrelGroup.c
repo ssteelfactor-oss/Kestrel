@@ -892,6 +892,8 @@ KestrelRunGroupScan(
         wprintf(L"  %-40s %-32s %-10lu %lu\n",
             pwszLabel, pwszName, pGroup->cMembers, pGroup->cEnabled);
 
+        KestrelPrintGroupProvenance(wszDN, pwszLabel);
+
         *ppTail = pGroup;
         ppTail = &pGroup->pNext;
         pRes->cGroups++;
@@ -921,6 +923,8 @@ KestrelRunGroupScan(
             wprintf(L"  %-40s %-32s %-10lu %lu\n",
                 pwszNm, wszSAM[0] ? wszSAM : pwszNm,
                 pGroup->cMembers, pGroup->cEnabled);
+
+            KestrelPrintGroupProvenance(wszDN, wszSAM[0] ? wszSAM : pwszNm);
 
             *ppTail = pGroup;
             ppTail = &pGroup->pNext;

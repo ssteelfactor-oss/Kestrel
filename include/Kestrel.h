@@ -543,6 +543,17 @@ VOID KestrelFreeGroupScanResult(
     _In_opt_ _Post_ptr_invalid_ KESTREL_GROUP_SCAN_RESULT *pResult);
 
 /* ════════════════════════════════════════════════════════════════════════════
+ * KestrelProvenance.c — replication-metadata provenance enrichment
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+/* Print recently-added direct members of a group (when + originating DSA),
+ * read from the constructed msDS-ReplValueMetaData attribute. No-op if the
+ * metadata is not readable. */
+VOID KestrelPrintGroupProvenance(
+    _In_z_ LPCWSTR pwszGroupDN,
+    _In_z_ LPCWSTR pwszLabel);
+
+/* ════════════════════════════════════════════════════════════════════════════
  * KestrelReport.c — v0.4
  * ════════════════════════════════════════════════════════════════════════════ */
 
