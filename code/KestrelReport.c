@@ -127,6 +127,24 @@ KestrelGraphAddGmsaEdges(
     _In_     KESTREL_GMSA_SCAN_RESULT *pGmsaResult);
 
 /*
+ * Phase 7: domain → trusted-domain "Trusts" edges (v0.7 Trust audit).
+ * Phase 8: principal → domain "ADCS_ESC" escalation edges (v0.7 ADCS audit).
+ */
+_Must_inspect_result_
+static HRESULT
+KestrelGraphAddTrustEdges(
+    _Inout_    KESTREL_GRAPH             *pGraph,
+    _In_       KESTREL_TRUST_SCAN_RESULT *pTrustResult,
+    _In_opt_z_ LPCWSTR                    pwszDomainNC);
+
+_Must_inspect_result_
+static HRESULT
+KestrelGraphAddAdcsEdges(
+    _Inout_    KESTREL_GRAPH            *pGraph,
+    _In_       KESTREL_ADCS_SCAN_RESULT *pADCSResult,
+    _In_opt_z_ LPCWSTR                   pwszDomainNC);
+
+/*
  * Phase 6: fold Kerberoastable / AS-REP Roastable status onto existing nodes
  * as properties (no edges). Matches by SID; only flags nodes already present
  * in the graph (reachable via ACL / membership / delegation).
@@ -217,6 +235,9 @@ KestrelBuildGraph(
     _In_opt_ KESTREL_LAPS_SCAN_RESULT   *pLapsResult,
     _In_opt_ KESTREL_GMSA_SCAN_RESULT   *pGMSAResult,
     _In_opt_ KESTREL_ROAST_SCAN_RESULT  *pRoastResult,
+    _In_opt_ KESTREL_TRUST_SCAN_RESULT  *pTrustResult,
+    _In_opt_ KESTREL_ADCS_SCAN_RESULT   *pADCSResult,
+    _In_opt_z_ LPCWSTR                   pwszDomainNC,
     _Outptr_ KESTREL_GRAPH             **ppGraph)
 {
     HRESULT        hr     = S_OK;
@@ -285,6 +306,20 @@ KestrelBuildGraph(
     if (pRoastResult && pRoastResult->cFindings > 0) {
         KestrelGraphApplyRoast(pGraph, pRoastResult);
         wprintf(L"  [*] Roastable flags:  %lu\n", pRoastResult->cFindings);
+    }
+
+    /* Phase 7: domain trusts (local domain → trusted domain) */
+    if (pTrustResult && pTrustResult->cFindings > 0) {
+        hr = KestrelGraphAddTrustEdges(pGraph, pTrustResult, pwszDomainNC);
+        if (FAILED(hr)) goto Cleanup;
+        wprintf(L"  [*] Trust edges:      %lu\n", pGraph->cTrustEdges);
+    }
+
+    /* Phase 8: ADCS escalation (enrollee/writer → domain) */
+    if (pADCSResult && pADCSResult->cFindings > 0) {
+        hr = KestrelGraphAddAdcsEdges(pGraph, pADCSResult, pwszDomainNC);
+        if (FAILED(hr)) goto Cleanup;
+        wprintf(L"  [*] ADCS edges:       %lu\n", pGraph->cAdcsEdges);
     }
 
     wprintf(L"  [*] Total nodes:      %lu\n", pGraph->cNodes);
@@ -401,6 +436,8 @@ KestrelEmitHtml(
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#C39BD3\"></div>RBCD</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#16A085\"></div>CanReadLAPS</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#E67E22\"></div>CanReadGMSA</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#2ECC71\"></div>Trusts</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#E74C3C\"></div>ADCS_ESC</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"dot\" style=\"background:#fff;border:2px solid #E74C3C\"></div>Roastable</div>\n", pFile);
     fputs("</div>\n", pFile);
 
@@ -411,6 +448,8 @@ KestrelEmitHtml(
     fputs("  <label><input type=\"checkbox\" id=\"f-deleg\" checked onchange=\"updateFilter()\"> Delegation</label>\n", pFile);
     fputs("  <label><input type=\"checkbox\" id=\"f-laps\" checked onchange=\"updateFilter()\"> LAPS read</label>\n", pFile);
     fputs("  <label><input type=\"checkbox\" id=\"f-gmsa\" checked onchange=\"updateFilter()\"> gMSA read</label>\n", pFile);
+    fputs("  <label><input type=\"checkbox\" id=\"f-trust\" checked onchange=\"updateFilter()\"> Trusts</label>\n", pFile);
+    fputs("  <label><input type=\"checkbox\" id=\"f-adcs\" checked onchange=\"updateFilter()\"> ADCS</label>\n", pFile);
     fputs("  <label><input type=\"checkbox\" id=\"f-deny\" onchange=\"updateFilter()\"> Show DENY</label>\n", pFile);
     fputs("</div>\n", pFile);
 
@@ -435,7 +474,9 @@ KestrelEmitHtml(
     fputs("  Delegation_S4U2Self: '#6C3483',\n", pFile);
     fputs("  Delegation_RBCD: '#C39BD3',\n", pFile);
     fputs("  CanReadLAPS: '#16A085',\n", pFile);
-    fputs("  CanReadGMSAPassword: '#E67E22'\n", pFile);
+    fputs("  CanReadGMSAPassword: '#E67E22',\n", pFile);
+    fputs("  Trusts: '#2ECC71',\n", pFile);
+    fputs("  ADCS_ESC: '#E74C3C'\n", pFile);
     fputs("};\n\n", pFile);
     fputs("const EDGE_SEVERITY = {\n", pFile);
     fputs("  GenericAll: 3, WriteDACL: 3, WriteOwner: 3,\n", pFile);
@@ -445,13 +486,15 @@ KestrelEmitHtml(
     fputs("  Delegation_S4U2Self: 1,\n", pFile);
     fputs("  Delegation_RBCD: 2, CanReadLAPS: 2, CanReadGMSAPassword: 3\n", pFile);
     fputs("};\n\n", pFile);
-    fputs("let activeFilters = { acl: true, member: true, deleg: true, laps: true, gmsa: true, deny: false };\n", pFile);
+    fputs("let activeFilters = { acl: true, member: true, deleg: true, laps: true, gmsa: true, trust: true, adcs: true, deny: false };\n", pFile);
     fputs("let simulation, svg, linkGroup, nodeGroup;\n\n", pFile);
     fputs("function isEdgeVisible(e) {\n", pFile);
     fputs("  if (e.deny && !activeFilters.deny) return false;\n", pFile);
     fputs("  if (e.type === 'MemberOf') return activeFilters.member;\n", pFile);
     fputs("  if (e.type === 'CanReadLAPS') return activeFilters.laps;\n", pFile);
     fputs("  if (e.type === 'CanReadGMSAPassword') return activeFilters.gmsa;\n", pFile);
+    fputs("  if (e.type === 'Trusts') return activeFilters.trust;\n", pFile);
+    fputs("  if (e.type === 'ADCS_ESC') return activeFilters.adcs;\n", pFile);
     fputs("  if (e.type.startsWith('Delegation')) return activeFilters.deleg;\n", pFile);
     fputs("  return activeFilters.acl;\n", pFile);
     fputs("}\n\n", pFile);
@@ -461,6 +504,8 @@ KestrelEmitHtml(
     fputs("  activeFilters.deleg  = document.getElementById('f-deleg').checked;\n", pFile);
     fputs("  activeFilters.laps   = document.getElementById('f-laps').checked;\n", pFile);
     fputs("  activeFilters.gmsa   = document.getElementById('f-gmsa').checked;\n", pFile);
+    fputs("  activeFilters.trust  = document.getElementById('f-trust').checked;\n", pFile);
+    fputs("  activeFilters.adcs   = document.getElementById('f-adcs').checked;\n", pFile);
     fputs("  activeFilters.deny   = document.getElementById('f-deny').checked;\n", pFile);
     fputs("  linkGroup.selectAll('line')\n", pFile);
     fputs("    .style('display', d => isEdgeVisible(d) ? null : 'none');\n", pFile);
@@ -972,6 +1017,164 @@ KestrelGraphAddGmsaEdges(
     return S_OK;
 }
 
+/*
+ * Convert a domain naming context ("DC=corp,DC=com") to a DNS name ("corp.com")
+ * for a readable domain-node label.
+ */
+static VOID
+_DomainNcToDns(_In_z_ LPCWSTR pwszNC,
+               _Out_writes_z_(cch) LPWSTR pwszOut, _In_ SIZE_T cch)
+{
+    SIZE_T j = 0;
+    const WCHAR *p = pwszNC;
+
+    if (cch) pwszOut[0] = L'\0';
+    while (*p && j + 1 < cch) {
+        if ((p[0] == L'D' || p[0] == L'd') &&
+            (p[1] == L'C' || p[1] == L'c') && p[2] == L'=') {
+            p += 3;
+            if (j > 0 && j + 1 < cch) pwszOut[j++] = L'.';
+            while (*p && *p != L',' && j + 1 < cch) pwszOut[j++] = *p++;
+        } else {
+            p++;
+        }
+    }
+    pwszOut[j] = L'\0';
+}
+
+/*
+ * Phase 7: one "Trusts" edge per domain trust — local domain → trusted domain.
+ * The local domain node is keyed by its naming context; trusted domains by the
+ * SID captured during the trust scan (falling back to the partner name).
+ */
+_Must_inspect_result_
+static HRESULT
+KestrelGraphAddTrustEdges(
+    _Inout_    KESTREL_GRAPH             *pGraph,
+    _In_       KESTREL_TRUST_SCAN_RESULT *pTrustResult,
+    _In_opt_z_ LPCWSTR                    pwszDomainNC)
+{
+    WCHAR wszLocalKey[520];
+    WCHAR wszLocalDns[128];
+    DWORD iLocal;
+    DWORD i;
+
+    LPCWSTR pwszNC = (pwszDomainNC && pwszDomainNC[0]) ? pwszDomainNC : L"local";
+    StringCchPrintfW(wszLocalKey, ARRAYSIZE(wszLocalKey), L"@DOMAIN:%s", pwszNC);
+    _DomainNcToDns(pwszNC, wszLocalDns, ARRAYSIZE(wszLocalDns));
+
+    iLocal = KestrelGraphGetOrAddNode(pGraph, wszLocalKey,
+        (pwszDomainNC ? pwszDomainNC : L""),
+        wszLocalDns[0] ? wszLocalDns : L"local-domain",
+        NODE_CLASS_DOMAIN, TRUE, TRUE);
+    if (iLocal == MAXDWORD)
+        return S_OK;
+
+    for (i = 0; i < pTrustResult->cFindings; i++) {
+        const KESTREL_TRUST_FINDING *pT = &pTrustResult->rgFindings[i];
+        WCHAR   wszKey[288];
+        WCHAR   wszDetail[128];
+        DWORD   iTo;
+        HRESULT hr;
+
+        if (pT->wszSid[0])
+            StringCchCopyW(wszKey, ARRAYSIZE(wszKey), pT->wszSid);
+        else
+            StringCchPrintfW(wszKey, ARRAYSIZE(wszKey), L"@TRUST:%s", pT->wszPartner);
+
+        iTo = KestrelGraphGetOrAddNode(pGraph, wszKey, L"",
+            pT->wszPartner[0] ? pT->wszPartner : pT->wszFlatName,
+            NODE_CLASS_DOMAIN, TRUE, TRUE);
+        if (iTo == MAXDWORD)
+            continue;
+
+        StringCchPrintfW(wszDetail, ARRAYSIZE(wszDetail), L"%s%s%s",
+            (pT->Direction == TRUST_DIR_INBOUND)       ? L"inbound"       :
+            (pT->Direction == TRUST_DIR_OUTBOUND)      ? L"outbound"      :
+            (pT->Direction == TRUST_DIR_BIDIRECTIONAL) ? L"bidirectional" : L"trust",
+            pT->bForestTransitive ? L", forest" : L"",
+            pT->bSidFiltering     ? L""         : L", no-SID-filter");
+
+        hr = KestrelGraphAddEdge(pGraph, iLocal, iTo,
+                                 GEDGE_TRUSTS, wszDetail, FALSE);
+        if (FAILED(hr)) return hr;
+        pGraph->cTrustEdges++;
+    }
+
+    return S_OK;
+}
+
+/*
+ * Phase 8: ADCS escalation edges. ESC1/2/3/9 give a low-priv *enrollee* a path
+ * to a DA-capable certificate; ESC4/5 give a low-priv *writer* control of the
+ * template/CA. Either way the triggering principal reaches domain-admin, so we
+ * draw principal → local-domain, labelled with the ESC class + template.
+ */
+_Must_inspect_result_
+static HRESULT
+KestrelGraphAddAdcsEdges(
+    _Inout_    KESTREL_GRAPH            *pGraph,
+    _In_       KESTREL_ADCS_SCAN_RESULT *pADCSResult,
+    _In_opt_z_ LPCWSTR                   pwszDomainNC)
+{
+    WCHAR wszLocalKey[520];
+    WCHAR wszLocalDns[128];
+    DWORD iDomain;
+    DWORD i;
+
+    LPCWSTR pwszNC = (pwszDomainNC && pwszDomainNC[0]) ? pwszDomainNC : L"local";
+    StringCchPrintfW(wszLocalKey, ARRAYSIZE(wszLocalKey), L"@DOMAIN:%s", pwszNC);
+    _DomainNcToDns(pwszNC, wszLocalDns, ARRAYSIZE(wszLocalDns));
+
+    iDomain = KestrelGraphGetOrAddNode(pGraph, wszLocalKey,
+        (pwszDomainNC ? pwszDomainNC : L""),
+        wszLocalDns[0] ? wszLocalDns : L"local-domain",
+        NODE_CLASS_DOMAIN, TRUE, TRUE);
+    if (iDomain == MAXDWORD)
+        return S_OK;
+
+    for (i = 0; i < pADCSResult->cFindings; i++) {
+        const KESTREL_ADCS_FINDING *pA = &pADCSResult->rgFindings[i];
+        WCHAR   wszDetail[128];
+        LPCWSTR pwszSid = NULL;
+        LPCWSTR pwszEsc = NULL;
+        DWORD   iFrom;
+        HRESULT hr;
+
+        /* enrollment-based escalation (enrollee → DA) */
+        if (pA->bLowPrivEnroll && pA->wszLowPrivSid[0] &&
+            (pA->bESC1 || pA->bESC2 || pA->bESC3 || pA->bESC9)) {
+            pwszSid = pA->wszLowPrivSid;
+            pwszEsc = pA->bESC1 ? L"ESC1" :
+                      pA->bESC3 ? L"ESC3" :
+                      pA->bESC9 ? L"ESC9" : L"ESC2";
+        }
+        /* template / CA write escalation (writer → DA) */
+        else if ((pA->bESC4 || pA->bESC5) && pA->wszWriteSid[0]) {
+            pwszSid = pA->wszWriteSid;
+            pwszEsc = pA->bESC4 ? L"ESC4" : L"ESC5";
+        }
+
+        if (!pwszSid)
+            continue;
+
+        iFrom = KestrelGraphGetOrAddNode(pGraph, pwszSid, L"", pwszSid,
+                                         NODE_CLASS_UNKNOWN, TRUE, TRUE);
+        if (iFrom == MAXDWORD)
+            continue;
+
+        StringCchPrintfW(wszDetail, ARRAYSIZE(wszDetail), L"%s: %s",
+                         pwszEsc, pA->wszName);
+
+        hr = KestrelGraphAddEdge(pGraph, iFrom, iDomain,
+                                 GEDGE_ADCS_ESC, wszDetail, FALSE);
+        if (FAILED(hr)) return hr;
+        pGraph->cAdcsEdges++;
+    }
+
+    return S_OK;
+}
+
 static VOID
 KestrelGraphApplyRoast(
     _Inout_  KESTREL_GRAPH             *pGraph,
@@ -1081,7 +1284,8 @@ static const char *g_rgszEdgeType[] = {
     "ExtendedRight", "WriteProperty",
     "MemberOf",
     "Delegation_Unconstrained", "Delegation_Constrained", "Delegation_S4U2Self",
-    "Delegation_RBCD", "CanReadLAPS", "CanReadGMSAPassword"
+    "Delegation_RBCD", "CanReadLAPS", "CanReadGMSAPassword",
+    "Trusts", "ADCS_ESC"
 };
 
 _Must_inspect_result_
@@ -1165,6 +1369,8 @@ KestrelEmitYaml(
     fprintf(pFile, "  delegEdges: %lu\n",  pGraph->cDelegEdges);
     fprintf(pFile, "  lapsEdges: %lu\n",   pGraph->cLapsEdges);
     fprintf(pFile, "  gmsaEdges: %lu\n",   pGraph->cGmsaEdges);
+    fprintf(pFile, "  trustEdges: %lu\n",  pGraph->cTrustEdges);
+    fprintf(pFile, "  adcsEdges: %lu\n",   pGraph->cAdcsEdges);
 
     /* String scalars are double-quoted; YAML 1.2 accepts JSON-style escapes,
        so the same escaper is reused. class/type are known-safe bare tokens. */

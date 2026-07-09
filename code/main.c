@@ -457,8 +457,10 @@ int wmain(int argc, wchar_t *argv[])
 
     /* ── v0.4: build graph + report (HTML / JSON / YAML by extension) ── */
     if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation ||
-        cfg.bRunLAPS || cfg.bRunPaths || cfg.bRunGMSA || cfg.bRunRoast) {
-        hr = KestrelBuildGraph(pACL, pGroup, pDeleg, pLaps, pGMSA, pRoast, &pGraph);
+        cfg.bRunLAPS || cfg.bRunPaths || cfg.bRunGMSA || cfg.bRunRoast ||
+        cfg.bRunTrust || cfg.bRunADCS) {
+        hr = KestrelBuildGraph(pACL, pGroup, pDeleg, pLaps, pGMSA, pRoast,
+                               pTrust, pADCS, wszDomainNC, &pGraph);
         if (FAILED(hr)) {
             wprintf(L"[!] KestrelBuildGraph failed: 0x%08X\n", hr);
         }

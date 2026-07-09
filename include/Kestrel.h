@@ -254,7 +254,9 @@ typedef enum _KESTREL_GRAPH_EDGE_TYPE {
     GEDGE_DELEG_S4U2SELF,
     GEDGE_DELEG_RBCD,
     GEDGE_CAN_READ_LAPS,
-    GEDGE_CAN_READ_GMSA_PASSWORD   /* 12 — v0.7 */
+    GEDGE_CAN_READ_GMSA_PASSWORD,  /* 12 — v0.7 */
+    GEDGE_TRUSTS,                  /* 13 — domain → trusted domain */
+    GEDGE_ADCS_ESC                 /* 14 — principal → domain (cert escalation) */
 } KESTREL_GRAPH_EDGE_TYPE;
 
 typedef struct _KESTREL_GRAPH_NODE {
@@ -295,6 +297,8 @@ typedef struct _KESTREL_GRAPH {
     DWORD                     cDelegEdges;
     DWORD                     cLapsEdges;
     DWORD                     cGmsaEdges;
+    DWORD                     cTrustEdges;
+    DWORD                     cAdcsEdges;
 } KESTREL_GRAPH;
 
 typedef enum _KESTREL_REPORT_FORMAT {
@@ -549,6 +553,9 @@ _Must_inspect_result_ HRESULT KestrelBuildGraph(
     _In_opt_ KESTREL_LAPS_SCAN_RESULT  *pLapsResult,
     _In_opt_ KESTREL_GMSA_SCAN_RESULT  *pGMSAResult,
     _In_opt_ KESTREL_ROAST_SCAN_RESULT *pRoastResult,
+    _In_opt_ KESTREL_TRUST_SCAN_RESULT *pTrustResult,
+    _In_opt_ KESTREL_ADCS_SCAN_RESULT  *pADCSResult,
+    _In_opt_z_ LPCWSTR                  pwszDomainNC,
     _Outptr_ KESTREL_GRAPH            **ppGraph);
 
 _Must_inspect_result_
