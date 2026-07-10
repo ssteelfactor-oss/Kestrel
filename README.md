@@ -106,9 +106,9 @@ All queries are read-only. Zero packets sent to target hosts.
 | **ADWS Endpoint Detection** | Probes port 9389/TCP per DC. Raw TCP connect, SO\_ERROR verification, no WCF framing.                                                                                                                                        |
 | **Computer Topology**       | Full computer inventory with SPN-based service inference. MSSQLSvc → SQL Server, WSMAN → WinRM, TERMSRV → RDP. One LDAP query covers the entire domain.                                                                      |
 | **Delegation Risks**        | Separates three categories: unconstrained delegation (TGT forwarding), constrained delegation (msDS-AllowedToDelegateTo), and Protocol Transition / S4U2Self (UAC 0x1000000). Reported separately - different risk profiles. |
-| **LAPS Health**             | Reads only the expiration timestamps (world-readable — not the password) for legacy and Windows LAPS. Beyond managed/unmanaged coverage it flags anomalies: expired (rotation stalled), future-dated (rotation suppressed — a persistence signal), dual-schema, and never-managed. DCs excluded.                     |
+| **LAPS Health**             | Reads only the expiration timestamps (world-readable - not the password) for legacy and Windows LAPS. Beyond managed/unmanaged coverage it flags anomalies: expired (rotation stalled), future-dated (rotation suppressed - a persistence signal), dual-schema, and never-managed. DCs excluded.                     |
 | **Stale Computers**         | Uses lastLogonTimestamp as primary reference - it replicates across DCs, unlike lastLogon which is per-DC only. Both values reported side by side.                                                                           |
-| **Sensitive Descriptions**  | Reads user `description` / `info` / `comment` (world-readable) and flags leaked secrets and role/weakness hints — passwords, "Domain Admin", "DCSync", "GMSA", "LAPS", "shadow credential". Admins routinely annotate accounts with their own weaknesses.                                                                  |
+| **Sensitive Descriptions**  | Reads user `description` / `info` / `comment` (world-readable) and flags leaked secrets and role/weakness hints - passwords, "Domain Admin", "DCSync", "GMSA", "LAPS", "shadow credential". Admins routinely annotate accounts with their own weaknesses.                                                                  |
 
 ### v0.2 ACL edge extraction (`KestrelACL.c`)
 
@@ -127,11 +127,11 @@ Plan A is attempted first. On first access denial, Kestrel switches to Plan B au
 
 A DCSync rights pass surfaces principals holding `GetChanges` + `GetChangesAll` over the domain head.
 
-Since v0.8 a **default-ACL baseline** (`KestrelBaseline.c`) cuts the noise: every object's ACEs are compared against the `defaultSecurityDescriptor` for its class — and against AdminSDHolder for `adminCount=1` objects — so only the rights an admin actually delegated are reported, not the defaults every object is born with. `--acl-raw` disables the filter.
+Since v0.8 a **default-ACL baseline** (`KestrelBaseline.c`) cuts the noise: every object's ACEs are compared against the `defaultSecurityDescriptor` for its class - and against AdminSDHolder for `adminCount=1` objects - so only the rights an admin actually delegated are reported, not the defaults every object is born with. `--acl-raw` disables the filter.
 
-**MAQ + RBCD weaponizability.** The scan reads `ms-DS-MachineAccountQuota` (default 10) as a posture finding, then labels every write on a computer object (`GenericAll`/`GenericWrite`/`WriteDacl`/`WriteOwner`, or a write of the RBCD attribute) as *RBCD-weaponizable now* when MAQ > 0 — because the attacker can also mint the machine account with an SPN needed to finish S4U2Proxy. With MAQ = 0 the same path is flagged RBCD-capable but not immediately weaponizable.
+**MAQ + RBCD weaponizability.** The scan reads `ms-DS-MachineAccountQuota` (default 10) as a posture finding, then labels every write on a computer object (`GenericAll`/`GenericWrite`/`WriteDacl`/`WriteOwner`, or a write of the RBCD attribute) as *RBCD-weaponizable now* when MAQ > 0 - because the attacker can also mint the machine account with an SPN needed to finish S4U2Proxy. With MAQ = 0 the same path is flagged RBCD-capable but not immediately weaponizable.
 
-**Cross-forest RBCD.** When an RBCD grant (`msDS-AllowedToActOnBehalfOfOtherIdentity`) names a principal from another domain or forest, its SID does not resolve locally. Kestrel compares each trustee's domain SID against the local domain and tags foreign principals `[FOREIGN — cross-domain/forest RBCD]` — the exact signal the defensive guidance says to resolve.
+**Cross-forest RBCD.** When an RBCD grant (`msDS-AllowedToActOnBehalfOfOtherIdentity`) names a principal from another domain or forest, its SID does not resolve locally. Kestrel compares each trustee's domain SID against the local domain and tags foreign principals `[FOREIGN - cross-domain/forest RBCD]` - the exact signal the defensive guidance says to resolve.
 
 ### v0.3 Transitive group membership (`KestrelGroup.c`)
 
@@ -139,11 +139,11 @@ Expands high-value groups using `LDAP_MATCHING_RULE_IN_CHAIN` (OID `1.2.840.1135
 
 One LDAP query per group. The DC performs full recursive traversal server-side - no client-side BFS.
 
-High-value groups are located by **well-known SID**, not by name — locale-independent. Domain groups (`S-1-5-21-…-RID`): Domain Admins (512), Schema Admins (518), Enterprise Admins (519), Group Policy Creator Owners (520), Read-only Domain Controllers (521), Key Admins (526), Enterprise Key Admins (527). BUILTIN aliases (`S-1-5-32-RID`): Administrators (544), Account/Server/Print/Backup Operators (548–551), Hyper-V Administrators (578). Groups with no fixed RID are resolved by name: **DnsAdmins** (arbitrary DLL load into `dns.exe` as SYSTEM on a DC) and DHCP Administrators.
+High-value groups are located by **well-known SID**, not by name - locale-independent. Domain groups (`S-1-5-21-…-RID`): Domain Admins (512), Schema Admins (518), Enterprise Admins (519), Group Policy Creator Owners (520), Read-only Domain Controllers (521), Key Admins (526), Enterprise Key Admins (527). BUILTIN aliases (`S-1-5-32-RID`): Administrators (544), Account/Server/Print/Backup Operators (548–551), Hyper-V Administrators (578). Groups with no fixed RID are resolved by name: **DnsAdmins** (arbitrary DLL load into `dns.exe` as SYSTEM on a DC) and DHCP Administrators.
 
 After expansion, cross-references group membership against ACL edges from v0.2 to surface attack paths: `member → [via group] → EdgeType → target`.
 
-**Provenance** (`KestrelProvenance.c`). For each high-value group, Kestrel reads the constructed `msDS-ReplValueMetaData` attribute (per-member replication metadata) and surfaces members **added within the last 90 days** — with the add time and the **originating DSA**. Recently-added privileged members are a classic persistence signal that raw membership does not reveal. The attribute is readable by anyone who can read the object (*not* gated by DS-Replication-Get-Changes / DCSync), is requested per-object (targeted, small footprint), and degrades silently if unavailable.
+**Provenance** (`KestrelProvenance.c`). For each high-value group, Kestrel reads the constructed `msDS-ReplValueMetaData` attribute (per-member replication metadata) and surfaces members **added within the last 90 days** - with the add time and the **originating DSA**. Recently-added privileged members are a classic persistence signal that raw membership does not reveal. The attribute is readable by anyone who can read the object (*not* gated by DS-Replication-Get-Changes / DCSync), is requested per-object (targeted, small footprint), and degrades silently if unavailable.
 
 ### v0.4 In-memory graph + report (`KestrelReport.c`)
 
@@ -171,13 +171,13 @@ Uses a compact CSR adjacency representation and output caps (per-target and glob
 
 The one module that steps outside LDAP (see *Footprint*). GPO settings live on SYSVOL, so this reads `Registry.pol` over SMB and parses `dSHeuristics`. Flags LLMNR, NBT-NS, WDigest, NTLMv1, and missing LDAP signing.
 
-It also flags the **Onelogon** (WOOT'26) surface — the *Allow vulnerable Netlogon secure channel connections* allow-list, i.e. accounts permitted to use unsigned/unsealed Netlogon channels (the compatibility hole left by the 2020 Zerologon patch). Each GPO's `GptTmpl.inf` is read and its `VulnerableChannelAllowList` SDDL decoded into the exempted principals. Domain-GPO scope only — an allow-list written directly to a DC's local registry would need remote-registry RPC, which Kestrel does not do.
+It also flags the **Onelogon** (WOOT'26) surface - the *Allow vulnerable Netlogon secure channel connections* allow-list, i.e. accounts permitted to use unsigned/unsealed Netlogon channels (the compatibility hole left by the 2020 Zerologon patch). Each GPO's `GptTmpl.inf` is read and its `VulnerableChannelAllowList` SDDL decoded into the exempted principals. Domain-GPO scope only - an allow-list written directly to a DC's local registry would need remote-registry RPC, which Kestrel does not do.
 
-**SMB signing** is checked from each GPO's `GptTmpl.inf` (`RequireSecuritySignature`, server and client) — the control that blocks the NTLM relay/reflection class (CVE-2025-33073, CVE-2026-24294). Server-side drives the verdict; when it isn't defined the result is `UNKNOWN`, since the OS default applies and member servers / Server 2025 do not require it by default.
+**SMB signing** is checked from each GPO's `GptTmpl.inf` (`RequireSecuritySignature`, server and client) - the control that blocks the NTLM relay/reflection class (CVE-2025-33073, CVE-2026-24294). Server-side drives the verdict; when it isn't defined the result is `UNKNOWN`, since the OS default applies and member servers / Server 2025 do not require it by default.
 
-**Anonymous LDAP posture** is read straight from the directory: `dSHeuristics` (7th character, `fLDAPBlockAnonOps`) reveals whether anonymous LDAP bind/search is enabled, and the **Pre-Windows 2000 Compatible Access** group is inspected for Anonymous Logon / Everyone members — either one reopens the pre-credential enumeration surface.
+**Anonymous LDAP posture** is read straight from the directory: `dSHeuristics` (7th character, `fLDAPBlockAnonOps`) reveals whether anonymous LDAP bind/search is enabled, and the **Pre-Windows 2000 Compatible Access** group is inspected for Anonymous Logon / Everyone members - either one reopens the pre-credential enumeration surface.
 
-**Dangerous User Rights Assignment.** The `[Privilege Rights]` section of each GPO's `GptTmpl.inf` is parsed for DA-equivalent privileges — `SeBackup`/`SeRestore` (read past every ACL, dump `ntds.dit`), `SeDebug` (LSASS), `SeTakeOwnership`/`SeLoadDriver`/`SeTcb`/`SeImpersonate`/`SeCreateToken` (SYSTEM) — granted to a *domain* principal (`S-1-5-21-…`) rather than only the built-in holders. Such a grant is domain-admin-equivalent and usually invisible to attack-graph tools, because it is a privilege, not an ACE.
+**Dangerous User Rights Assignment.** The `[Privilege Rights]` section of each GPO's `GptTmpl.inf` is parsed for DA-equivalent privileges - `SeBackup`/`SeRestore` (read past every ACL, dump `ntds.dit`), `SeDebug` (LSASS), `SeTakeOwnership`/`SeLoadDriver`/`SeTcb`/`SeImpersonate`/`SeCreateToken` (SYSTEM) - granted to a *domain* principal (`S-1-5-21-…`) rather than only the built-in holders. Such a grant is domain-admin-equivalent and usually invisible to attack-graph tools, because it is a privilege, not an ACE.
 
 ### v0.6 Roastable accounts (`KestrelRoast.c`)
 
@@ -213,11 +213,11 @@ ESC6 (CA registry flag), ESC7 (CA role ACL), and ESC8 (web-enrollment endpoint) 
 
 ### v0.7 GPP cpassword recovery (`KestrelGPP.c`)
 
-Walks SYSVOL over SMB and parses every Group Policy Preferences XML (Groups, Services, ScheduledTasks, DataSources, Drives, Printers) for `cpassword` — credentials AES-encrypted with the key Microsoft published in 2014 (MS14-025). Any domain user can recover them, so they are decrypted and shown (with the account and GPO) to prove recoverability and force rotation. Largely legacy, but old values persist on SYSVOL for years. Same footprint as the policy audit (an SMB read of SYSVOL). Plaintext buffers are scrubbed with `SecureZeroMemory`.
+Walks SYSVOL over SMB and parses every Group Policy Preferences XML (Groups, Services, ScheduledTasks, DataSources, Drives, Printers) for `cpassword` - credentials AES-encrypted with the key Microsoft published in 2014 (MS14-025). Any domain user can recover them, so they are decrypted and shown (with the account and GPO) to prove recoverability and force rotation. Largely legacy, but old values persist on SYSVOL for years. Same footprint as the policy audit (an SMB read of SYSVOL). Plaintext buffers are scrubbed with `SecureZeroMemory`.
 
 ### v0.8 Default-ACL baseline (`KestrelBaseline.c`)
 
-Not a scan but a filter for the ACL module. It builds a baseline of "expected" ACEs from two authoritative, ordinary-user, pure-LDAP sources — each `classSchema`'s `defaultSecurityDescriptor`, and the `AdminSDHolder` DACL (for `adminCount=1` objects) — then suppresses object ACEs that match it. What remains is the set of genuine, admin-introduced delegations, not the rights every object inherits at birth. `--acl-raw` turns it off to show the raw set.
+Not a scan but a filter for the ACL module. It builds a baseline of "expected" ACEs from two authoritative, ordinary-user, pure-LDAP sources - each `classSchema`'s `defaultSecurityDescriptor`, and the `AdminSDHolder` DACL (for `adminCount=1` objects) - then suppresses object ACEs that match it. What remains is the set of genuine, admin-introduced delegations, not the rights every object inherits at birth. `--acl-raw` turns it off to show the raw set.
 
 ## Roadmap
 
