@@ -129,26 +129,21 @@ A DCSync rights pass surfaces principals holding `GetChanges` + `GetChangesAll` 
 
 Since v0.8 a **default-ACL baseline** (`KestrelBaseline.c`) cuts the noise: every object's ACEs are compared against the `defaultSecurityDescriptor` for its class — and against AdminSDHolder for `adminCount=1` objects — so only the rights an admin actually delegated are reported, not the defaults every object is born with. `--acl-raw` disables the filter.
 
+**MAQ + RBCD weaponizability.** The scan reads `ms-DS-MachineAccountQuota` (default 10) as a posture finding, then labels every write on a computer object (`GenericAll`/`GenericWrite`/`WriteDacl`/`WriteOwner`, or a write of the RBCD attribute) as *RBCD-weaponizable now* when MAQ > 0 — because the attacker can also mint the machine account with an SPN needed to finish S4U2Proxy. With MAQ = 0 the same path is flagged RBCD-capable but not immediately weaponizable.
+
+**Cross-forest RBCD.** When an RBCD grant (`msDS-AllowedToActOnBehalfOfOtherIdentity`) names a principal from another domain or forest, its SID does not resolve locally. Kestrel compares each trustee's domain SID against the local domain and tags foreign principals `[FOREIGN — cross-domain/forest RBCD]` — the exact signal the defensive guidance says to resolve.
+
 ### v0.3 Transitive group membership (`KestrelGroup.c`)
 
 Expands high-value groups using `LDAP_MATCHING_RULE_IN_CHAIN` (OID `1.2.840.113556.1.4.1941`).
 
 One LDAP query per group. The DC performs full recursive traversal server-side - no client-side BFS.
 
-Groups are located by **RID**, not by name:
-
-| RID     | Group                                 |
-| ------- | ------------------------------------- |
-| 512     | Domain Admins                         |
-| 518     | Schema Admins                         |
-| 519     | Enterprise Admins                     |
-| 520     | Group Policy Creator Owners           |
-| 521     | Read-only Domain Controllers          |
-| 526     | Key Admins                            |
-| 527     | Enterprise Key Admins                 |
-| 548–551 | Account/Server/Print/Backup Operators |
+High-value groups are located by **well-known SID**, not by name — locale-independent. Domain groups (`S-1-5-21-…-RID`): Domain Admins (512), Schema Admins (518), Enterprise Admins (519), Group Policy Creator Owners (520), Read-only Domain Controllers (521), Key Admins (526), Enterprise Key Admins (527). BUILTIN aliases (`S-1-5-32-RID`): Administrators (544), Account/Server/Print/Backup Operators (548–551), Hyper-V Administrators (578). Groups with no fixed RID are resolved by name: **DnsAdmins** (arbitrary DLL load into `dns.exe` as SYSTEM on a DC) and DHCP Administrators.
 
 After expansion, cross-references group membership against ACL edges from v0.2 to surface attack paths: `member → [via group] → EdgeType → target`.
+
+**Provenance** (`KestrelProvenance.c`). For each high-value group, Kestrel reads the constructed `msDS-ReplValueMetaData` attribute (per-member replication metadata) and surfaces members **added within the last 90 days** — with the add time and the **originating DSA**. Recently-added privileged members are a classic persistence signal that raw membership does not reveal. The attribute is readable by anyone who can read the object (*not* gated by DS-Replication-Get-Changes / DCSync), is requested per-object (targeted, small footprint), and degrades silently if unavailable.
 
 ### v0.4 In-memory graph + report (`KestrelReport.c`)
 
@@ -158,6 +153,8 @@ Folded into the same graph:
 
 - **gMSA read edges** - `CanReadGMSAPassword` (reader → gMSA), from v0.7.
 - **Roastable node flags** - Kerberoastable / AS-REP Roastable marked as node properties.
+- **Trust edges** - `Trusts` (local domain → trusted domain), carrying direction and SID-filtering status.
+- **ADCS escalation edges** - `ADCS_ESC` (enrollee/writer → domain), labelled with the ESC class and template, so certificate paths join the same graph as ACL and membership.
 
 Exports to a self-contained interactive **HTML** report (D3.js force graph with filtering and a node detail panel), **JSON**, and **YAML** - format chosen by output extension. All serialization is written with `fputs`, never `printf`-family, to sidestep MSVC `C4477` format-string pitfalls in CSS/JSON output.
 
@@ -180,6 +177,8 @@ It also flags the **Onelogon** (WOOT'26) surface — the *Allow vulnerable Netlo
 
 **Anonymous LDAP posture** is read straight from the directory: `dSHeuristics` (7th character, `fLDAPBlockAnonOps`) reveals whether anonymous LDAP bind/search is enabled, and the **Pre-Windows 2000 Compatible Access** group is inspected for Anonymous Logon / Everyone members — either one reopens the pre-credential enumeration surface.
 
+**Dangerous User Rights Assignment.** The `[Privilege Rights]` section of each GPO's `GptTmpl.inf` is parsed for DA-equivalent privileges — `SeBackup`/`SeRestore` (read past every ACL, dump `ntds.dit`), `SeDebug` (LSASS), `SeTakeOwnership`/`SeLoadDriver`/`SeTcb`/`SeImpersonate`/`SeCreateToken` (SYSTEM) — granted to a *domain* principal (`S-1-5-21-…`) rather than only the built-in holders. Such a grant is domain-admin-equivalent and usually invisible to attack-graph tools, because it is a privilege, not an ACE.
+
 ### v0.6 Roastable accounts (`KestrelRoast.c`)
 
 - **Kerberoastable** - user accounts carrying an SPN (krbtgt excluded).
@@ -189,7 +188,7 @@ Detection only - no ticket is ever requested. Findings are also folded into the 
 
 ### v0.7 Domain trust posture (`KestrelTrust.c`)
 
-Enumerates `trustedDomain` objects and decodes direction, type, and `trustAttributes`. Flags missing SID filtering on **inbound external** trusts (the classic sIDHistory-injection surface), TGT delegation across a trust, and RC4. Within-forest and forest-transitive trusts are excluded from the SID-filter check - they filter by default, so flagging them would be a false positive.
+Enumerates `trustedDomain` objects and decodes direction, type, and `trustAttributes`. Flags missing SID filtering on **inbound external** trusts (the classic sIDHistory-injection surface), TGT delegation across a trust, and RC4. Within-forest and forest-transitive trusts are excluded from the SID-filter check - they filter by default, so flagging them would be a false positive. Since v0.10 trusts also feed the graph as domain→domain `Trusts` edges.
 
 ### v0.7 gMSA password readers (`KestrelGMSA.c`)
 
@@ -210,7 +209,7 @@ Passive certificate-template and CA audit from the Configuration NC, read-only, 
 
 Findings are cross-referenced against templates actually published by a CA - an unpublished template is reported but flagged `published: no`. Property-scoped WriteProperty and default-locked templates are excluded from ESC4 to avoid false positives.
 
-ESC6 (CA registry flag), ESC7 (CA role ACL), and ESC8 (web-enrollment endpoint) are intentionally **out of scope**: none is observable from a passive LDAP read.
+ESC6 (CA registry flag), ESC7 (CA role ACL), and ESC8 (web-enrollment endpoint) are intentionally **out of scope**: none is observable from a passive LDAP read. Since v0.10, ESC1/2/3/9 (enrollee) and ESC4/5 (template/CA writer) also feed the graph as `ADCS_ESC` edges to the domain node.
 
 ### v0.7 GPP cpassword recovery (`KestrelGPP.c`)
 
@@ -224,7 +223,7 @@ Not a scan but a filter for the ACL module. It builds a baseline of "expected" A
 
 | Version | Status | Description                                                                 |
 | ------- | ------ | --------------------------------------------------------------------------- |
-| v0.1    | ✅      | Five passive AD scans                                                       |
+| v0.1    | ✅      | Six passive AD scans                                                        |
 | v0.2    | ✅      | ACL edge extraction + DCSync rights                                         |
 | v0.3    | ✅      | Transitive group membership via LDAP\_MATCHING\_RULE\_IN\_CHAIN             |
 | v0.4    | ✅      | In-memory graph from ACL + membership + delegation. HTML / JSON / YAML.     |
@@ -233,8 +232,7 @@ Not a scan but a filter for the ACL module. It builds a baseline of "expected" A
 | v0.7    | ✅      | Trust posture · gMSA password readers · ADCS ESC1-5/9 · GPP cpassword       |
 | v0.8    | ✅      | Default-ACL baseline (delegation noise suppression) · Onelogon detection    |
 | v0.9    | ✅      | LAPS health anomalies · SMB signing (NTLM relay) · Anonymous LDAP posture · description leak scan |
-| -       | 🔲      | `ms-DS-MachineAccountQuota` + RBCD weaponizability enrichment               |
-| -       | 🔲      | Trust / ADCS edges in the graph + report                                    |
+| v0.10   | ✅      | MAQ + RBCD weaponizability · cross-forest RBCD (foreign SID) · dangerous User Rights + built-in groups (operators / DnsAdmins) · Trust/ADCS graph edges · replication-metadata provenance |
 | -       | 🔲      | ADExplorer snapshot as an offline input source (diff over time)             |
 
 ## Screens
