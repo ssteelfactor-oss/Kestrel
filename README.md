@@ -290,11 +290,7 @@ High-value groups are located by **well-known SID**, not by name - locale-indepe
 
 After expansion, cross-references group membership against ACL edges from v0.2 to surface attack paths: `member → [via group] → EdgeType → target`.
 
-<<<<<<< HEAD
-**Provenance** (`KestrelProvenance.c`). For each high-value group, Kestrel reads the constructed `msDS-ReplValueMetaData` attribute (per-member replication metadata) and surfaces members **added within the last 90 days** - with the add time and the **originating DSA**. Recently-added privileged members are a classic persistence signal that raw membership does not reveal. The attribute is readable by anyone who can read the object (*not* gated by DS-Replication-Get-Changes / DCSync), is requested per-object (targeted, small footprint), and degrades silently if unavailable.
-=======
 **Provenance** (`KestrelProvenance.c`). For each high-value group, Kestrel reads the constructed `msDS-ReplValueMetaData` attribute (per-member replication metadata) and surfaces members **added within the last 90 days** - with the add time and the **originating DSA**. Recently-added privileged members are a classic persistence signal that raw membership does not reveal. The attribute is readable by anyone who can read the object (*not* gated by DS-Replication-Get-Changes / DCSync), is requested per-object (targeted, small footprint), and degrades silently if unavailable. The same primitive also runs single-attribute (`msDS-ReplAttributeMetaData`) provenance on high-value findings — when an object's DACL (`nTSecurityDescriptor`), an RBCD grant, or a shadow-credential key was last written, and from which DSA.
->>>>>>> e4767fb (update 11.07.2026 18:59:32,49)
 
 ### v0.4 In-memory graph + report (`KestrelReport.c`)
 
