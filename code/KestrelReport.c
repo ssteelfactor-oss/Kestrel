@@ -21,6 +21,7 @@
 
 #include "../include/Kestrel.h"
 
+
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Cleanup forward declarations                                               */
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -1434,6 +1435,150 @@ KestrelGuessFormat(
         if (_wcsicmp(pwszDot, L".yml")  == 0) return KESTREL_REPORT_YAML;
     }
     return KESTREL_REPORT_HTML;
+}
+
+/*
+ * KestrelWriteOpenGraph
+ * BloodHound CE OpenGraph export. Emits the in-memory graph as generic
+ * nodes/edges JSON per the SpecterOps OpenGraph schema:
+ *   { "metadata": { "source_kind": "Kestrel" },
+ *     "graph": { "nodes": [ { id, kinds[], properties{} } ],
+ *                "edges": [ { kind, start{match_by,value}, end{...}, properties{} } ] } }
+ * Node id = objectSid (unique, lets BloodHound correlate by objectid); edges
+ * reference nodes by that id. Self-contained (own open/write/close); leaves the
+ * HTML/JSON/YAML path untouched. All strings go through KestrelEmitJsonStringW
+ * for correct UTF-8 + JSON escaping.
+ *
+ * Kestrel node class -> BloodHound kind (every node also carries "Base").
+ */
+static const char *g_rgszBhNodeKind[] = {
+    "Base",       /* NODE_CLASS_UNKNOWN   */
+    "User",       /* NODE_CLASS_USER      */
+    "Group",      /* NODE_CLASS_GROUP     */
+    "Computer",   /* NODE_CLASS_COMPUTER  */
+    "OU",         /* NODE_CLASS_OU        */
+    "Domain",     /* NODE_CLASS_DOMAIN    */
+    "GPO",        /* NODE_CLASS_GPO       */
+    "Container"   /* NODE_CLASS_CONTAINER */
+};
+
+/* Kestrel edge type -> BloodHound edge kind. Canonical BloodHound names where a
+ * clean equivalent exists; descriptive custom names otherwise. Every name
+ * satisfies OpenGraph's ^[A-Za-z0-9_]+$ constraint. Indexed by GEDGE_*. */
+static const char *g_rgszBhEdgeKind[] = {
+    "GenericAll",              /* GEDGE_ACL_GENERIC_ALL         */
+    "WriteDacl",               /* GEDGE_ACL_WRITE_DACL          */
+    "WriteOwner",              /* GEDGE_ACL_WRITE_OWNER         */
+    "GenericWrite",            /* GEDGE_ACL_GENERIC_WRITE       */
+    "AllExtendedRights",       /* GEDGE_ACL_EXTENDED_RIGHT      */
+    "WriteProperty",           /* GEDGE_ACL_WRITE_PROP          */
+    "MemberOf",                /* GEDGE_MEMBER_OF               */
+    "DelegationUnconstrained", /* GEDGE_DELEG_UNCONSTRAINED     */
+    "AllowedToDelegate",       /* GEDGE_DELEG_CONSTRAINED       */
+    "DelegationS4U2Self",      /* GEDGE_DELEG_S4U2SELF          */
+    "AllowedToAct",            /* GEDGE_DELEG_RBCD              */
+    "ReadLAPSPassword",        /* GEDGE_CAN_READ_LAPS           */
+    "ReadGMSAPassword",        /* GEDGE_CAN_READ_GMSA_PASSWORD  */
+    "Trusts",                  /* GEDGE_TRUSTS                  */
+    "ADCSESC"                  /* GEDGE_ADCS_ESC                */
+};
+
+/* Emit a node id: objectSid when present, else a stable synthetic key so every
+ * node (and the edges that reference it) still resolves. */
+static VOID
+_EmitNodeId(_In_ FILE *pFile, _In_ const KESTREL_GRAPH_NODE *pN, _In_ DWORD idx)
+{
+    if (pN->wszSid[0]) KestrelEmitJsonStringW(pFile, pN->wszSid);
+    else               fprintf(pFile, "kestrel-node-%lu", idx);
+}
+
+_Must_inspect_result_
+HRESULT
+KestrelWriteOpenGraph(
+    _In_   const KESTREL_GRAPH *pGraph,
+    _In_z_ LPCWSTR              pwszOutputPath)
+{
+    FILE *pFile;
+
+    if (!pGraph || !pwszOutputPath) return E_INVALIDARG;
+
+    wprintf(L"\n[*] Writing BloodHound OpenGraph: %s\n", pwszOutputPath);
+
+    /* Binary mode: narrow UTF-8 bytes produced explicitly (see KestrelWriteReport). */
+    pFile = _wfopen(pwszOutputPath, L"wb");
+    if (!pFile) {
+        wprintf(L"[!] Failed to open output file\n");
+        return HRESULT_FROM_WIN32(ERROR_OPEN_FAILED);
+    }
+
+    fputs("{\n", pFile);
+    fputs("  \"metadata\": { \"source_kind\": \"Kestrel\" },\n", pFile);
+    fputs("  \"graph\": {\n", pFile);
+
+    /* ── nodes ─────────────────────────────────────────────────────── */
+    fputs("    \"nodes\": [\n", pFile);
+    for (DWORD i = 0; i < pGraph->cNodes; i++) {
+        const KESTREL_GRAPH_NODE *pN = &pGraph->pNodes[i];
+        const char *pszKind = (pN->Class < ARRAYSIZE(g_rgszBhNodeKind))
+            ? g_rgszBhNodeKind[pN->Class] : "Base";
+
+        fputs("      { \"id\": \"", pFile);
+        _EmitNodeId(pFile, pN, i);
+        fputs("\", \"kinds\": [", pFile);
+        if (pN->Class == NODE_CLASS_UNKNOWN)
+            fputs("\"Base\"", pFile);
+        else
+            fprintf(pFile, "\"%s\", \"Base\"", pszKind);
+        fputs("], \"properties\": { \"name\": \"", pFile);
+        KestrelEmitJsonStringW(pFile, pN->wszLabel);
+        fputs("\", \"objectid\": \"", pFile);
+        KestrelEmitJsonStringW(pFile, pN->wszSid);
+        fputs("\", \"distinguishedname\": \"", pFile);
+        KestrelEmitJsonStringW(pFile, pN->wszDN);
+        fprintf(pFile,
+            "\", \"enabled\": %s, \"highvalue\": %s, \"unconstraineddelegation\": %s, \"kerberoastable\": %s, \"asreproastable\": %s } }%s\n",
+            pN->bEnabled            ? "true" : "false",
+            pN->bHighValue          ? "true" : "false",
+            pN->bUnconstrainedDeleg ? "true" : "false",
+            pN->bKerberoastable     ? "true" : "false",
+            pN->bASREPRoastable     ? "true" : "false",
+            (i + 1 < pGraph->cNodes) ? "," : "");
+    }
+    fputs("    ],\n", pFile);
+
+    /* ── edges ─────────────────────────────────────────────────────── */
+    fputs("    \"edges\": [\n", pFile);
+    for (DWORD i = 0; i < pGraph->cEdges; i++) {
+        const KESTREL_GRAPH_EDGE *pE = &pGraph->pEdges[i];
+        const char *pszKind = (pE->Type < ARRAYSIZE(g_rgszBhEdgeKind))
+            ? g_rgszBhEdgeKind[pE->Type] : "Unknown";
+        const KESTREL_GRAPH_NODE *pFrom = &pGraph->pNodes[pE->iFrom];
+        const KESTREL_GRAPH_NODE *pTo   = &pGraph->pNodes[pE->iTo];
+
+        fprintf(pFile,
+            "      { \"kind\": \"%s\", \"start\": { \"match_by\": \"id\", \"value\": \"",
+            pszKind);
+        _EmitNodeId(pFile, pFrom, pE->iFrom);
+        fputs("\" }, \"end\": { \"match_by\": \"id\", \"value\": \"", pFile);
+        _EmitNodeId(pFile, pTo, pE->iTo);
+        fputs("\" }, \"properties\": { \"detail\": \"", pFile);
+        KestrelEmitJsonStringW(pFile, pE->wszDetail);
+        fprintf(pFile, "\", \"isacl\": %s, \"deny\": %s } }%s\n",
+            (pE->Type <= GEDGE_ACL_WRITE_PROP) ? "true" : "false",
+            pE->bDeny ? "true" : "false",
+            (i + 1 < pGraph->cEdges) ? "," : "");
+    }
+    fputs("    ]\n", pFile);
+
+    fputs("  }\n}\n", pFile);
+
+    if (fclose(pFile) != 0)
+        return HRESULT_FROM_WIN32(ERROR_WRITE_FAULT);
+
+    wprintf(L"  [+] OpenGraph written — %lu nodes, %lu edges\n",
+        pGraph->cNodes, pGraph->cEdges);
+    wprintf(L"  [+] Import via BloodHound CE: Administration → File Ingest\n");
+    return S_OK;
 }
 
 /*

@@ -188,6 +188,108 @@ KestrelPrintGroupProvenance(
         wprintf(L"  [provenance] %s - %lu direct member(s), none added in last %d days\n",
                 pwszLabel, cTotal, KESTREL_PROV_RECENT_DAYS);
 
+    /* also surface a recently-changed DACL on the group object itself */
+    {
+        static const LPCWSTR rgSD[] = { L"nTSecurityDescriptor" };
+        KestrelPrintAttrProvenance(pwszGroupDN, pwszLabel, rgSD, 1, TRUE);
+    }
+
+Cleanup:
+    if (hSearch) pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)  pSearch->lpVtbl->Release(pSearch);
+}
+
+/*
+ * Single-attribute provenance. Reads the constructed msDS-ReplAttributeMetaData
+ * for an object and, for each requested attribute, prints when it last changed
+ * and from which originating DSA — turning a finding into "…and this was set N
+ * days ago from DC-X". Same access model (ordinary read of a constructed,
+ * non-secret attribute) and graceful degradation as the value-metadata path.
+ *   bOnlyRecent = TRUE  -> print only attributes changed within the window
+ *   bOnlyRecent = FALSE -> always print the requested attributes' last change
+ */
+VOID
+KestrelPrintAttrProvenance(
+    _In_z_ LPCWSTR                     pwszObjectDN,
+    _In_z_ LPCWSTR                     pwszLabel,
+    _In_reads_(cAttrs) const LPCWSTR  *rgAttrs,
+    _In_   DWORD                       cAttrs,
+    _In_   BOOL                        bOnlyRecent)
+{
+    HRESULT             hr;
+    IDirectorySearch   *pSearch = NULL;
+    ADS_SEARCH_HANDLE   hSearch = NULL;
+    WCHAR               wszPath[600];
+    WCHAR               wszCutoff[40];
+    LPWSTR              attrs[]  = { (LPWSTR)L"msDS-ReplAttributeMetaData" };
+    ADS_SEARCHPREF_INFO prefs[1];
+
+    if (!pwszObjectDN || !pwszObjectDN[0] || !rgAttrs || cAttrs == 0) return;
+
+    if (FAILED(StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszObjectDN)))
+        return;
+
+    hr = ADsGetObject(wszPath, &IID_IDirectorySearch, (void **)&pSearch);
+    if (FAILED(hr)) return;
+
+    prefs[0].dwSearchPref   = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType  = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_BASE;
+    pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 1);
+
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch, (LPWSTR)L"(objectClass=*)",
+            attrs, 1, &hSearch);
+    if (FAILED(hr)) goto Cleanup;
+
+    _RecentCutoff(wszCutoff, ARRAYSIZE(wszCutoff), KESTREL_PROV_RECENT_DAYS);
+
+    if (pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+        ADS_SEARCH_COLUMN col = { 0 };
+
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,
+                (LPWSTR)L"msDS-ReplAttributeMetaData", &col)) && col.dwNumValues > 0) {
+
+            for (DWORD v = 0; v < col.dwNumValues; v++) {
+                const WCHAR *p, *b, *e;
+
+                if (col.pADsValues[v].dwType != ADSTYPE_CASE_IGNORE_STRING) continue;
+                p = col.pADsValues[v].CaseIgnoreString;
+                if (!p) continue;
+
+                while ((b = wcsstr(p, L"<DS_REPL_ATTR_META_DATA>")) != NULL) {
+                    WCHAR wszName[64], wszTime[40], wszVer[16], wszDsa[160], wszShort[64];
+                    DWORD a;
+
+                    e = wcsstr(b, L"</DS_REPL_ATTR_META_DATA>");
+                    if (!e) break;
+
+                    if (_XmlField(b, e, L"pszAttributeName", wszName, ARRAYSIZE(wszName))) {
+                        for (a = 0; a < cAttrs; a++) {
+                            BOOL bRecent;
+                            if (_wcsicmp(wszName, rgAttrs[a]) != 0) continue;
+
+                            _XmlField(b, e, L"ftimeLastOriginatingChange", wszTime, ARRAYSIZE(wszTime));
+                            _XmlField(b, e, L"pszLastOriginatingDsaDN",    wszDsa,  ARRAYSIZE(wszDsa));
+                            _XmlField(b, e, L"dwVersion",                  wszVer,  ARRAYSIZE(wszVer));
+                            _DsaShort(wszDsa, wszShort, ARRAYSIZE(wszShort));
+
+                            bRecent = (wszTime[0] && wcscmp(wszTime, wszCutoff) >= 0);
+                            if (!bOnlyRecent || bRecent)
+                                wprintf(L"  [provenance] %s %-42s last change %s  from %s  (v%s)%s\n",
+                                        pwszLabel, wszName,
+                                        wszTime[0] ? wszTime : L"(none)",
+                                        wszShort, wszVer[0] ? wszVer : L"?",
+                                        bRecent ? L"  *** RECENT ***" : L"");
+                            break;
+                        }
+                    }
+                    p = e + 1;
+                }
+            }
+            pSearch->lpVtbl->FreeColumn(pSearch, &col);
+        }
+    }
+
 Cleanup:
     if (hSearch) pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
     if (pSearch)  pSearch->lpVtbl->Release(pSearch);

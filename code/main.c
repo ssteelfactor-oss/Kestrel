@@ -67,12 +67,15 @@ KestrelPrintHelp(VOID)
         L"  --paths        Attack-path analysis over the graph (to tier-0)\n"
         L"  --from <prin>  Paths FROM a principal (SID/name); implies --paths\n"
         L"  --roast        Kerberoastable + AS-REP Roastable detection\n"
+        L"  --shadowcreds  Shadow credentials (msDS-KeyCredentialLink) detection\n"
         L"  --trust        Domain/forest trust posture audit\n"
         L"  --gmsa         gMSA password reader enumeration\n"
         L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
         L"  --gpp          GPP cpassword recovery (SYSVOL/SMB)\n\n"
         L"OUTPUT:\n"
-        L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n\n"
+        L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n"
+        L"  --opengraph <path>  Export BloodHound CE OpenGraph JSON\n"
+        L"  --diff <path>  Diff current run against a previous .json snapshot\n\n"
         L"OPTIONS:\n"
         L"  --verbose / -v   Enable trace output\n"
         L"  --acl-raw        Disable default-ACL baseline (show raw ACL edges)\n"
@@ -104,6 +107,7 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunPolicy     = TRUE;
     pCfg->bRunPaths      = TRUE;
     pCfg->bRunRoast      = TRUE;
+    pCfg->bRunShadowCreds = TRUE;
     pCfg->bRunTrust      = TRUE;
     pCfg->bRunGMSA       = TRUE;
     pCfg->bRunADCS       = TRUE;
@@ -156,6 +160,28 @@ KestrelParseArgs(
             }
             StringCchCopyW(pCfg->wszReportPath,
                 ARRAYSIZE(pCfg->wszReportPath),
+                argv[++i]);
+            continue;
+        }
+
+        if (_wcsicmp(arg, L"--opengraph") == 0) {
+            if (i + 1 >= argc) {
+                wprintf(L"[!] --opengraph requires a path argument\n");
+                return FALSE;
+            }
+            StringCchCopyW(pCfg->wszOpenGraphPath,
+                ARRAYSIZE(pCfg->wszOpenGraphPath),
+                argv[++i]);
+            continue;
+        }
+
+        if (_wcsicmp(arg, L"--diff") == 0) {
+            if (i + 1 >= argc) {
+                wprintf(L"[!] --diff requires a path argument\n");
+                return FALSE;
+            }
+            StringCchCopyW(pCfg->wszDiffPath,
+                ARRAYSIZE(pCfg->wszDiffPath),
                 argv[++i]);
             continue;
         }
@@ -223,6 +249,11 @@ KestrelParseArgs(
         }
         if (_wcsicmp(arg, L"--roast") == 0) {
             pCfg->bRunRoast = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--shadowcreds") == 0) {
+            pCfg->bRunShadowCreds = TRUE;
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -410,6 +441,14 @@ int wmain(int argc, wchar_t *argv[])
             pRoast ? pRoast->cASREP : 0);
     }
 
+    /* ── shadow credentials (msDS-KeyCredentialLink) ──────────────── */
+    if (cfg.bRunShadowCreds) {
+        wprintf(L"\n═══ Kestrel — Shadow Credential Scan ═══\n\n");
+        hr = KestrelRunShadowCredScan(wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunShadowCredScan failed: 0x%08X\n", hr);
+    }
+
     /* ── v0.7: domain trust posture audit ────────────────────────── */
     if (cfg.bRunTrust) {
         wprintf(L"\n═══ Kestrel v0.7 — Domain Trust Posture ═══\n\n");
@@ -487,6 +526,15 @@ int wmain(int argc, wchar_t *argv[])
                     pGraph ? pGraph->cEdges : 0);
                 wprintf(L"[*] Use --report <path.html|.json|.yaml> to generate a report\n");
             }
+
+            if (cfg.wszOpenGraphPath[0] != L'\0') {
+                hr = KestrelWriteOpenGraph(pGraph, cfg.wszOpenGraphPath);
+                if (FAILED(hr))
+                    wprintf(L"[!] KestrelWriteOpenGraph failed: 0x%08X\n", hr);
+            }
+
+            if (cfg.wszDiffPath[0] != L'\0')
+                KestrelRunDiff(pGraph, cfg.wszDiffPath);
         }
     }
 

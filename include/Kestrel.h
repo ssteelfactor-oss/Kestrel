@@ -22,6 +22,10 @@
 #define COBJMACROS
 #define CINTERFACE
 
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+
 /* winsock2.h MUST precede windows.h */
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -70,6 +74,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunPaths;     /* v0.5 attack-path finder      */
     BOOL bRunRPC;       /* v0.5                         */
     BOOL bRunRoast;     /* v0.6 Kerberoast / AS-REP     */
+    BOOL bRunShadowCreds; /* shadow credentials (KeyCredentialLink) */
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
@@ -77,6 +82,8 @@ typedef struct _KESTREL_CONFIG {
 
     /* Output */
     WCHAR wszReportPath[512];
+    WCHAR wszOpenGraphPath[512];
+    WCHAR wszDiffPath[512];
     WCHAR wszFrom[256];        /* path finder source; empty = to-tier-0 */
 
     /* Options */
@@ -553,6 +560,17 @@ VOID KestrelPrintGroupProvenance(
     _In_z_ LPCWSTR pwszGroupDN,
     _In_z_ LPCWSTR pwszLabel);
 
+/* Print the last-originating-change time + DSA for one or more single-valued
+ * attributes of an object, read from the constructed msDS-ReplAttributeMetaData
+ * attribute. bOnlyRecent limits output to attributes changed within the window.
+ * No-op if the metadata is not readable. */
+VOID KestrelPrintAttrProvenance(
+    _In_z_ LPCWSTR                     pwszObjectDN,
+    _In_z_ LPCWSTR                     pwszLabel,
+    _In_reads_(cAttrs) const LPCWSTR  *rgAttrs,
+    _In_   DWORD                       cAttrs,
+    _In_   BOOL                        bOnlyRecent);
+
 /* ════════════════════════════════════════════════════════════════════════════
  * KestrelReport.c — v0.4
  * ════════════════════════════════════════════════════════════════════════════ */
@@ -587,6 +605,19 @@ _Must_inspect_result_ HRESULT
 KestrelWriteReportAuto(
     _In_   const KESTREL_GRAPH *pGraph,
     _In_z_ LPCWSTR              pwszOutputPath);
+
+/* BloodHound CE OpenGraph export (generic nodes/edges JSON). Self-contained
+ * writer; does not affect the HTML/JSON/YAML report path. */
+_Must_inspect_result_ HRESULT
+KestrelWriteOpenGraph(
+    _In_   const KESTREL_GRAPH *pGraph,
+    _In_z_ LPCWSTR              pwszOutputPath);
+
+/* Diff the current in-memory graph against a previous Kestrel JSON snapshot and
+ * print new / removed attack-path edges. No-op on read failure. */
+VOID KestrelRunDiff(
+    _In_   const KESTREL_GRAPH *pGraph,
+    _In_z_ LPCWSTR              pwszPrevPath);
 
 /* ════════════════════════════════════════════════════════════════════════════
  * KestrelPolicy.c — v0.5
@@ -641,6 +672,13 @@ HRESULT KestrelRunRoastScan(
 
 VOID KestrelFreeRoastScanResult(
     _In_opt_ _Post_ptr_invalid_ KESTREL_ROAST_SCAN_RESULT *pResult);
+
+/* Shadow-credential detection: enumerate objects with a populated
+ * msDS-KeyCredentialLink, decode key usage + creation time, and report
+ * provenance. Prints directly; returns S_OK on completion. */
+_Must_inspect_result_
+HRESULT KestrelRunShadowCredScan(
+    _In_z_ LPCWSTR pwszDomainNC);
 
 /* ════════════════════════════════════════════════════════════════════════════
  * KestrelTrust.c — v0.7

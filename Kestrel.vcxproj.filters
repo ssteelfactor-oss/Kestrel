@@ -57,6 +57,12 @@
     <ClCompile Include="code\KestrelProvenance.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="code\KestrelDiff.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
+    <ClCompile Include="code\KestrelShadowCreds.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Kestrel.h">

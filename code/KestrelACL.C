@@ -1161,6 +1161,51 @@ KestrelDelegResultAppend(
     return S_OK;
 }
 
+/* Read the domain's own SID string (S-1-5-21-D1-D2-D3) from the NC head. */
+static BOOL _ReadDomainSid(_In_z_ LPCWSTR pwszDomainNC,
+                           _Out_writes_z_(cch) LPWSTR pwszOut, _In_ size_t cch)
+{
+    HRESULT             hr;
+    IDirectorySearch   *pSearch = 0;
+    ADS_SEARCH_HANDLE   hSearch = 0;
+    WCHAR               wszPath[512];
+    ADS_SEARCHPREF_INFO prefs[1];
+    LPWSTR              attrs[] = { (LPWSTR)L"objectSid" };
+    BOOL                bOk = FALSE;
+
+    if (cch) pwszOut[0] = L'\0';
+    if (FAILED(StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszDomainNC)))
+        return FALSE;
+    if (FAILED(ADsGetObject(wszPath, &IID_IDirectorySearch, (void **)&pSearch)))
+        return FALSE;
+
+    prefs[0].dwSearchPref   = ADS_SEARCHPREF_SEARCH_SCOPE;
+    prefs[0].vValue.dwType  = ADSTYPE_INTEGER;
+    prefs[0].vValue.Integer = ADS_SCOPE_BASE;
+    pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 1);
+
+    hr = pSearch->lpVtbl->ExecuteSearch(pSearch, (LPWSTR)L"(objectClass=*)", attrs, 1, &hSearch);
+    if (SUCCEEDED(hr) &&
+        pSearch->lpVtbl->GetNextRow(pSearch, hSearch) != S_ADS_NOMORE_ROWS) {
+        ADS_SEARCH_COLUMN col = { 0 };
+        if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch, (LPWSTR)L"objectSid", &col)) &&
+            col.dwNumValues > 0 &&
+            col.pADsValues[0].dwType == ADSTYPE_OCTET_STRING) {
+            PSID   pSid = (PSID)col.pADsValues[0].OctetString.lpValue;
+            LPWSTR s    = NULL;
+            if (pSid && IsValidSid(pSid) && ConvertSidToStringSidW(pSid, &s) && s) {
+                StringCchCopyW(pwszOut, cch, s);
+                LocalFree(s);
+                bOk = TRUE;
+            }
+            pSearch->lpVtbl->FreeColumn(pSearch, &col);
+        }
+    }
+    if (hSearch) pSearch->lpVtbl->CloseSearchHandle(pSearch, hSearch);
+    if (pSearch)  pSearch->lpVtbl->Release(pSearch);
+    return bOk;
+}
+
 /*
  * Walk the DACL inside an RBCD security descriptor
  * (msDS-AllowedToActOnBehalfOfOtherIdentity) and emit one RBCD finding per
@@ -1174,6 +1219,7 @@ KestrelEmitRbcdFromSd(
     _In_z_   LPCWSTR                    pwszDN,
     _In_z_   LPCWSTR                    pwszSam,
     _In_z_   LPCWSTR                    pwszClass,
+    _In_z_   LPCWSTR                    pwszLocalDomainSid,
     _Inout_  KESTREL_DELEG_SCAN_RESULT *pResult)
 {
     PACL pDacl = NULL;
@@ -1207,7 +1253,19 @@ KestrelEmitRbcdFromSd(
 
         LPWSTR pwszSidStr = NULL;
         if (ConvertSidToStringSidW(pSid, &pwszSidStr) && pwszSidStr) {
-            StringCchCopyW(f.wszDetail, ARRAYSIZE(f.wszDetail), pwszSidStr);
+            BOOL bForeign = FALSE;
+            if (pwszLocalDomainSid && pwszLocalDomainSid[0] &&
+                _wcsnicmp(pwszSidStr, L"S-1-5-21-", 9) == 0) {
+                WCHAR wszPrefix[72];
+                StringCchPrintfW(wszPrefix, ARRAYSIZE(wszPrefix), L"%s-", pwszLocalDomainSid);
+                if (_wcsnicmp(pwszSidStr, wszPrefix, wcslen(wszPrefix)) != 0)
+                    bForeign = TRUE;   /* a domain SID, but not this domain */
+            }
+            if (bForeign)
+                StringCchPrintfW(f.wszDetail, ARRAYSIZE(f.wszDetail),
+                    L"%s  [FOREIGN - cross-domain/forest RBCD]", pwszSidStr);
+            else
+                StringCchCopyW(f.wszDetail, ARRAYSIZE(f.wszDetail), pwszSidStr);
             LocalFree(pwszSidStr);
         } else {
             StringCchCopyW(f.wszDetail, ARRAYSIZE(f.wszDetail), L"(invalid SID)");
@@ -1233,6 +1291,7 @@ KestrelScanDelegation(
     ADS_SEARCH_HANDLE          hSearch = NULL;
     KESTREL_DELEG_SCAN_RESULT *pResult = NULL;
     WCHAR                      wszPath[512];
+    WCHAR                      wszDomainSid[64] = L"";
 
     if (!pwszDomainNC || !ppResult) return E_INVALIDARG;
     *ppResult = NULL;
@@ -1240,6 +1299,9 @@ KestrelScanDelegation(
     pResult = (KESTREL_DELEG_SCAN_RESULT *)HeapAlloc(GetProcessHeap(),
         HEAP_ZERO_MEMORY, sizeof(*pResult));
     if (!pResult) return E_OUTOFMEMORY;
+
+    /* Local domain SID — used to flag foreign (cross-domain/forest) RBCD trustees */
+    _ReadDomainSid(pwszDomainNC, wszDomainSid, ARRAYSIZE(wszDomainSid));
 
     hr = StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszDomainNC);
     if (FAILED(hr)) goto Cleanup;
@@ -1387,11 +1449,18 @@ KestrelScanDelegation(
             bGotRbcd = TRUE;
             PSECURITY_DESCRIPTOR pSD = (PSECURITY_DESCRIPTOR)
                 colRbcd.pADsValues[0].ProviderSpecific.lpValue;
-            hr = KestrelEmitRbcdFromSd(pSD, wszDN, wszSam, wszClass, pResult);
+            hr = KestrelEmitRbcdFromSd(pSD, wszDN, wszSam, wszClass, wszDomainSid, pResult);
             if (FAILED(hr)) { pSearch->lpVtbl->FreeColumn(pSearch, &colRbcd);
                               goto RowCleanup; }
         }
         if (bGotRbcd) pSearch->lpVtbl->FreeColumn(pSearch, &colRbcd);
+
+        if (bGotRbcd) {
+            static const LPCWSTR rgRbcd[] = {
+                L"msDS-AllowedToActOnBehalfOfOtherIdentity"
+            };
+            KestrelPrintAttrProvenance(wszDN, L"RBCD", rgRbcd, 1, FALSE);
+        }
 
         pResult->cObjectsScanned++;
         continue;
