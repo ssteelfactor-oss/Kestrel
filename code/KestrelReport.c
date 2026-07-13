@@ -209,6 +209,49 @@ static KESTREL_REPORT_FORMAT
 KestrelGuessFormat(_In_z_ LPCWSTR pwszPath);
 
 
+/*
+ * HasSIDHistory edges: holder → the SID it carries in sIDHistory. Added to an
+ * already-built graph (post-pass, called from main after KestrelBuildGraph), so
+ * holder nodes dedup against those from ACL/group scans. Public — unlike the
+ * trust/ADCS passes it runs from its own scan result rather than inside build.
+ */
+_Must_inspect_result_
+HRESULT
+KestrelGraphAddSidHistoryEdges(
+    _Inout_ KESTREL_GRAPH                  *pGraph,
+    _In_    KESTREL_SIDHISTORY_SCAN_RESULT *pResult)
+{
+    DWORD i;
+
+    if (!pGraph || !pResult) return E_INVALIDARG;
+
+    for (i = 0; i < pResult->cFindings; i++) {
+        const KESTREL_SIDHIST_FINDING *pF = &pResult->rgFindings[i];
+        DWORD   iFrom, iTo;
+        HRESULT hr;
+
+        if (!pF->wszHolderSid[0] || !pF->wszHistSid[0])
+            continue;
+
+        iFrom = KestrelGraphGetOrAddNode(pGraph, pF->wszHolderSid, L"",
+            pF->wszHolderLabel[0] ? pF->wszHolderLabel : pF->wszHolderSid,
+            pF->HolderClass, TRUE, TRUE);
+        iTo = KestrelGraphGetOrAddNode(pGraph, pF->wszHistSid, L"",
+            pF->wszHistSid, NODE_CLASS_UNKNOWN, TRUE, TRUE);
+        if (iFrom == MAXDWORD || iTo == MAXDWORD)
+            continue;
+
+        hr = KestrelGraphAddEdge(pGraph, iFrom, iTo, GEDGE_HAS_SID_HISTORY,
+                pF->bPrivileged ? L"PRIVILEGED sid-history" :
+                pF->bForeign    ? L"foreign sid-history"    : L"sid-history",
+                FALSE);
+        if (FAILED(hr)) return hr;
+        pGraph->cSidHistEdges++;
+    }
+
+    return S_OK;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Public API                                                                 */
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -439,6 +482,7 @@ KestrelEmitHtml(
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#E67E22\"></div>CanReadGMSA</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#2ECC71\"></div>Trusts</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#E74C3C\"></div>ADCS_ESC</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#9B59B6\"></div>HasSIDHistory</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"dot\" style=\"background:#fff;border:2px solid #E74C3C\"></div>Roastable</div>\n", pFile);
     fputs("</div>\n", pFile);
 
@@ -451,6 +495,7 @@ KestrelEmitHtml(
     fputs("  <label><input type=\"checkbox\" id=\"f-gmsa\" checked onchange=\"updateFilter()\"> gMSA read</label>\n", pFile);
     fputs("  <label><input type=\"checkbox\" id=\"f-trust\" checked onchange=\"updateFilter()\"> Trusts</label>\n", pFile);
     fputs("  <label><input type=\"checkbox\" id=\"f-adcs\" checked onchange=\"updateFilter()\"> ADCS</label>\n", pFile);
+    fputs("  <label><input type=\"checkbox\" id=\"f-sidhist\" checked onchange=\"updateFilter()\"> SIDHistory</label>\n", pFile);
     fputs("  <label><input type=\"checkbox\" id=\"f-deny\" onchange=\"updateFilter()\"> Show DENY</label>\n", pFile);
     fputs("</div>\n", pFile);
 
@@ -477,7 +522,8 @@ KestrelEmitHtml(
     fputs("  CanReadLAPS: '#16A085',\n", pFile);
     fputs("  CanReadGMSAPassword: '#E67E22',\n", pFile);
     fputs("  Trusts: '#2ECC71',\n", pFile);
-    fputs("  ADCS_ESC: '#E74C3C'\n", pFile);
+    fputs("  ADCS_ESC: '#E74C3C',\n", pFile);
+    fputs("  HasSIDHistory: '#9B59B6'\n", pFile);
     fputs("};\n\n", pFile);
     fputs("const EDGE_SEVERITY = {\n", pFile);
     fputs("  GenericAll: 3, WriteDACL: 3, WriteOwner: 3,\n", pFile);
@@ -487,7 +533,7 @@ KestrelEmitHtml(
     fputs("  Delegation_S4U2Self: 1,\n", pFile);
     fputs("  Delegation_RBCD: 2, CanReadLAPS: 2, CanReadGMSAPassword: 3\n", pFile);
     fputs("};\n\n", pFile);
-    fputs("let activeFilters = { acl: true, member: true, deleg: true, laps: true, gmsa: true, trust: true, adcs: true, deny: false };\n", pFile);
+    fputs("let activeFilters = { acl: true, member: true, deleg: true, laps: true, gmsa: true, trust: true, adcs: true, sidhist: true, deny: false };\n", pFile);
     fputs("let simulation, svg, linkGroup, nodeGroup;\n\n", pFile);
     fputs("function isEdgeVisible(e) {\n", pFile);
     fputs("  if (e.deny && !activeFilters.deny) return false;\n", pFile);
@@ -496,6 +542,7 @@ KestrelEmitHtml(
     fputs("  if (e.type === 'CanReadGMSAPassword') return activeFilters.gmsa;\n", pFile);
     fputs("  if (e.type === 'Trusts') return activeFilters.trust;\n", pFile);
     fputs("  if (e.type === 'ADCS_ESC') return activeFilters.adcs;\n", pFile);
+    fputs("  if (e.type === 'HasSIDHistory') return activeFilters.sidhist;\n", pFile);
     fputs("  if (e.type.startsWith('Delegation')) return activeFilters.deleg;\n", pFile);
     fputs("  return activeFilters.acl;\n", pFile);
     fputs("}\n\n", pFile);
@@ -507,6 +554,7 @@ KestrelEmitHtml(
     fputs("  activeFilters.gmsa   = document.getElementById('f-gmsa').checked;\n", pFile);
     fputs("  activeFilters.trust  = document.getElementById('f-trust').checked;\n", pFile);
     fputs("  activeFilters.adcs   = document.getElementById('f-adcs').checked;\n", pFile);
+    fputs("  activeFilters.sidhist = document.getElementById('f-sidhist').checked;\n", pFile);
     fputs("  activeFilters.deny   = document.getElementById('f-deny').checked;\n", pFile);
     fputs("  linkGroup.selectAll('line')\n", pFile);
     fputs("    .style('display', d => isEdgeVisible(d) ? null : 'none');\n", pFile);
@@ -1286,7 +1334,7 @@ static const char *g_rgszEdgeType[] = {
     "MemberOf",
     "Delegation_Unconstrained", "Delegation_Constrained", "Delegation_S4U2Self",
     "Delegation_RBCD", "CanReadLAPS", "CanReadGMSAPassword",
-    "Trusts", "ADCS_ESC"
+    "Trusts", "ADCS_ESC", "HasSIDHistory"
 };
 
 _Must_inspect_result_
@@ -1372,6 +1420,7 @@ KestrelEmitYaml(
     fprintf(pFile, "  gmsaEdges: %lu\n",   pGraph->cGmsaEdges);
     fprintf(pFile, "  trustEdges: %lu\n",  pGraph->cTrustEdges);
     fprintf(pFile, "  adcsEdges: %lu\n",   pGraph->cAdcsEdges);
+    fprintf(pFile, "  sidHistEdges: %lu\n", pGraph->cSidHistEdges);
 
     /* String scalars are double-quoted; YAML 1.2 accepts JSON-style escapes,
        so the same escaper is reused. class/type are known-safe bare tokens. */
@@ -1480,7 +1529,8 @@ static const char *g_rgszBhEdgeKind[] = {
     "ReadLAPSPassword",        /* GEDGE_CAN_READ_LAPS           */
     "ReadGMSAPassword",        /* GEDGE_CAN_READ_GMSA_PASSWORD  */
     "Trusts",                  /* GEDGE_TRUSTS                  */
-    "ADCSESC"                  /* GEDGE_ADCS_ESC                */
+    "ADCSESC",                 /* GEDGE_ADCS_ESC                */
+    "HasSIDHistory"            /* GEDGE_HAS_SID_HISTORY         */
 };
 
 /* Emit a node id: objectSid when present, else a stable synthetic key so every

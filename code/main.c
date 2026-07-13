@@ -68,6 +68,8 @@ KestrelPrintHelp(VOID)
         L"  --from <prin>  Paths FROM a principal (SID/name); implies --paths\n"
         L"  --roast        Kerberoastable + AS-REP Roastable detection\n"
         L"  --shadowcreds  Shadow credentials (msDS-KeyCredentialLink) detection\n"
+        L"  --sidhistory   sIDHistory enumeration (privileged / foreign SID injection)\n"
+        L"  --adminsdholder  Orphaned adminCount=1 objects (AdminSDHolder)\n"
         L"  --trust        Domain/forest trust posture audit\n"
         L"  --gmsa         gMSA password reader enumeration\n"
         L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
@@ -108,6 +110,8 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunPaths      = TRUE;
     pCfg->bRunRoast      = TRUE;
     pCfg->bRunShadowCreds = TRUE;
+    pCfg->bRunSidHistory  = TRUE;
+    pCfg->bRunAdminSDHolder = TRUE;
     pCfg->bRunTrust      = TRUE;
     pCfg->bRunGMSA       = TRUE;
     pCfg->bRunADCS       = TRUE;
@@ -257,6 +261,16 @@ KestrelParseArgs(
             pCfg->bExplicitModules = TRUE;
             continue;
         }
+        if (_wcsicmp(arg, L"--sidhistory") == 0) {
+            pCfg->bRunSidHistory = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--adminsdholder") == 0) {
+            pCfg->bRunAdminSDHolder = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
         if (_wcsicmp(arg, L"--trust") == 0) {
             pCfg->bRunTrust = TRUE;
             pCfg->bExplicitModules = TRUE;
@@ -326,6 +340,7 @@ int wmain(int argc, wchar_t *argv[])
     KESTREL_PATH_RESULT           *pPaths  = 0;
     KESTREL_ROAST_SCAN_RESULT     *pRoast  = 0;
     KESTREL_TRUST_SCAN_RESULT     *pTrust  = 0;
+    KESTREL_SIDHISTORY_SCAN_RESULT *pSidHist = 0;
     KESTREL_GMSA_SCAN_RESULT      *pGMSA   = 0;
     KESTREL_ADCS_SCAN_RESULT      *pADCS   = 0;
     KESTREL_GPP_SCAN_RESULT       * pGPP   = 0;
@@ -449,6 +464,22 @@ int wmain(int argc, wchar_t *argv[])
             wprintf(L"[!] KestrelRunShadowCredScan failed: 0x%08X\n", hr);
     }
 
+    /* ── SID history (sIDHistory) ─────────────────────────────────── */
+    if (cfg.bRunSidHistory) {
+        wprintf(L"\n═══ Kestrel — SID History Scan ═══\n\n");
+        hr = KestrelRunSidHistoryScan(wszDomainNC, &pSidHist);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunSidHistoryScan failed: 0x%08X\n", hr);
+    }
+
+    /* ── orphaned adminCount (AdminSDHolder) ──────────────────────── */
+    if (cfg.bRunAdminSDHolder) {
+        wprintf(L"\n═══ Kestrel — AdminSDHolder Orphan Scan ═══\n\n");
+        hr = KestrelRunAdminSDHolderScan(wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunAdminSDHolderScan failed: 0x%08X\n", hr);
+    }
+
     /* ── v0.7: domain trust posture audit ────────────────────────── */
     if (cfg.bRunTrust) {
         wprintf(L"\n═══ Kestrel v0.7 — Domain Trust Posture ═══\n\n");
@@ -497,7 +528,7 @@ int wmain(int argc, wchar_t *argv[])
     /* ── v0.4: build graph + report (HTML / JSON / YAML by extension) ── */
     if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation ||
         cfg.bRunLAPS || cfg.bRunPaths || cfg.bRunGMSA || cfg.bRunRoast ||
-        cfg.bRunTrust || cfg.bRunADCS) {
+        cfg.bRunTrust || cfg.bRunADCS || cfg.bRunSidHistory) {
         hr = KestrelBuildGraph(pACL, pGroup, pDeleg, pLaps, pGMSA, pRoast,
                                pTrust, pADCS, wszDomainNC, &pGraph);
         if (FAILED(hr)) {
@@ -506,6 +537,13 @@ int wmain(int argc, wchar_t *argv[])
         else {
             /* tag tier-0 (also enriches the report's high-value rings) */
             KestrelTagHighValue(pGraph);
+
+            /* fold sIDHistory findings in as HasSIDHistory edges */
+            if (pSidHist) {
+                hr = KestrelGraphAddSidHistoryEdges(pGraph, pSidHist);
+                if (FAILED(hr))
+                    wprintf(L"[!] KestrelGraphAddSidHistoryEdges failed: 0x%08X\n", hr);
+            }
 
             /* v0.5: attack-path analysis */
             if (cfg.bRunPaths) {
@@ -547,6 +585,7 @@ Cleanup:
     KestrelFreePolicyResult(pPolicy);
     KestrelFreePathResult(pPaths);
     KestrelFreeRoastScanResult(pRoast);
+    KestrelFreeSidHistoryScanResult(pSidHist);
     KestrelFreeTrustScanResult(pTrust);
     KestrelFreeGMSAScanResult(pGMSA);
     KestrelFreeADCSScanResult(pADCS);

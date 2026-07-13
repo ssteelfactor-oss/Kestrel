@@ -16,10 +16,6 @@
  * line), so a small field scanner is enough; no JSON dependency is pulled in.
  */
 
-#ifndef _CRT_SECURE_NO_WARNINGS
-#define _CRT_SECURE_NO_WARNINGS   /* _wfopen — as used elsewhere in Kestrel */
-#endif
-
 #include "../include/Kestrel.h"
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +29,7 @@ static const char *g_rgszDiffEdgeType[] = {
     "MemberOf",
     "Delegation_Unconstrained", "Delegation_Constrained", "Delegation_S4U2Self",
     "Delegation_RBCD", "CanReadLAPS", "CanReadGMSAPassword",
-    "Trusts", "ADCS_ESC"
+    "Trusts", "ADCS_ESC", "HasSIDHistory"
 };
 
 typedef struct { char *sid; char *label; } DIFF_NODE;

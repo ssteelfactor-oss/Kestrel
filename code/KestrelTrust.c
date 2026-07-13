@@ -204,6 +204,60 @@ VOID KestrelFreeTrustScanResult(
     HeapFree(GetProcessHeap(), 0, pResult);
 }
 
+/*
+ * W2K25 trust-account posture (per Jorge's "AD forest as a security boundary"):
+ * for an incoming trust the trust account <flatName>$ lives locally, and its keys
+ * can be extracted from the trusting side to request a TGT here. The only real
+ * mitigation is an Authentication Policy assigned to that account
+ * (msDS-AssignedAuthNPolicy, pointing at a non-existent silo). primaryGroupID
+ * also reveals whether W2K25 moved the account out of Domain Users (528/529 vs
+ * legacy 513) — informational; it does NOT block the attack on its own.
+ */
+static VOID
+_CheckTrustAccount(_In_z_ LPCWSTR pwszDomainNC, _Inout_ KESTREL_TRUST_FINDING *pF)
+{
+    IDirectorySearch   *pS = NULL;
+    ADS_SEARCH_HANDLE   h  = NULL;
+    WCHAR               wszPath[600], wszFilter[160];
+    ADS_SEARCHPREF_INFO pref;
+    LPWSTR attrs[] = { (LPWSTR)L"msDS-AssignedAuthNPolicy", (LPWSTR)L"primaryGroupID" };
+
+    if (!pF->wszFlatName[0]) return;
+    if (FAILED(StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszDomainNC))) return;
+    if (FAILED(ADsGetObject(wszPath, &IID_IDirectorySearch, (void **)&pS))) return;
+
+    pref.dwSearchPref   = ADS_SEARCHPREF_SEARCH_SCOPE;
+    pref.vValue.dwType  = ADSTYPE_INTEGER;
+    pref.vValue.Integer = ADS_SCOPE_SUBTREE;
+    pS->lpVtbl->SetSearchPreference(pS, &pref, 1);
+
+    StringCchPrintfW(wszFilter, ARRAYSIZE(wszFilter),
+        L"(&(objectClass=user)(sAMAccountName=%s$))", pF->wszFlatName);
+
+    if (SUCCEEDED(pS->lpVtbl->ExecuteSearch(pS, wszFilter, attrs, 2, &h)) &&
+        pS->lpVtbl->GetNextRow(pS, h) != S_ADS_NOMORE_ROWS) {
+        ADS_SEARCH_COLUMN col;
+        BOOL bHasPolicy = FALSE;
+
+        pF->bTrustAcctChecked = TRUE;
+
+        if (pS->lpVtbl->GetColumn(pS, h, (LPWSTR)L"msDS-AssignedAuthNPolicy", &col) == S_OK) {
+            if (col.dwNumValues > 0) bHasPolicy = TRUE;
+            pS->lpVtbl->FreeColumn(pS, &col);
+        }
+        pF->bTrustAcctNoAuthPolicy = !bHasPolicy;
+
+        if (pS->lpVtbl->GetColumn(pS, h, (LPWSTR)L"primaryGroupID", &col) == S_OK) {
+            if (col.dwADsType == ADSTYPE_INTEGER && col.dwNumValues)
+                pF->dwTrustAcctPGID = (DWORD)col.pADsValues[0].Integer;
+            pS->lpVtbl->FreeColumn(pS, &col);
+        }
+    }
+
+    if (h)  pS->lpVtbl->CloseSearchHandle(pS, h);
+    if (pS) pS->lpVtbl->Release(pS);
+}
+
 _Must_inspect_result_
 HRESULT KestrelRunTrustScan(
     _In_z_   LPCWSTR                     pwszDomainNC,
@@ -277,6 +331,18 @@ HRESULT KestrelRunTrustScan(
         f.Type         = (KESTREL_TRUST_TYPE)lType;
         f.dwAttributes = (DWORD)lAttr;
         _TrustClassify(&f);
+
+        /* W2K25: for an incoming trust, check the local trust account's AuthN Policy */
+        if (f.Direction == TRUST_DIR_INBOUND ||
+            f.Direction == TRUST_DIR_BIDIRECTIONAL) {
+            _CheckTrustAccount(pwszDomainNC, &f);
+            if (f.bTrustAcctNoAuthPolicy) {
+                if (f.wszRisk[0])
+                    StringCchCatW(f.wszRisk, ARRAYSIZE(f.wszRisk), L" | ");
+                StringCchCatW(f.wszRisk, ARRAYSIZE(f.wszRisk),
+                    L"VULN: trust-acct no AuthN Policy (TGT abuse)");
+            }
+        }
 
         pResult->cObjectsScanned++;
         if (f.Direction == TRUST_DIR_INBOUND ||

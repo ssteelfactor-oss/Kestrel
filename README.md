@@ -63,18 +63,18 @@ Project Properties → C/C++ → Code Generation → Runtime Library → **Multi
 
 ## Usage
 
-With no flags, Kestrel runs **every module** and prints to the console; add `--report` for a shareable artifact. Everything below runs as an ordinary authenticated domain user — no elevation.
+With no flags, Kestrel runs **every module** and prints to the console; add `--report` for a shareable artifact. Everything below runs as an ordinary authenticated domain user - no elevation.
 
 ```
 Kestrel.exe                              # full posture sweep, console output
 Kestrel.exe --report C:\out\report.html  # full sweep + interactive HTML report
 ```
 
-Selecting any module flag runs **only** the modules you name. Graph outputs (`--report`, `--opengraph`) need the graph-building modules (`--acl --groups --delegation --trust --adcs`) — or just run bare (all modules) and add the output flag.
+Selecting any module flag runs **only** the modules you name. Graph outputs (`--report`, `--opengraph`) need the graph-building modules (`--acl --groups --delegation --trust --adcs`) - or just run bare (all modules) and add the output flag.
 
 ### Commands by what you're looking for
 
-**"Who can take over the domain?" — attack paths to Tier-0**
+**"Who can take over the domain?" - attack paths to Tier-0**
 
 ```
 Kestrel.exe --acl --groups --delegation --report C:\out\paths.html
@@ -82,7 +82,7 @@ Kestrel.exe --acl --groups --delegation --report C:\out\paths.html
 
 Full graph (ACL edges + transitive privileged membership + delegation); every path reaching Domain/Enterprise Admins, DCs, or krbtgt.
 
-**"What can THIS account reach?" — blast radius of one principal**
+**"What can THIS account reach?" - blast radius of one principal**
 
 ```
 Kestrel.exe --from "CONTOSO\svc_sql"
@@ -91,7 +91,7 @@ Kestrel.exe --from S-1-5-21-1111111111-2222222222-3333333333-1104
 
 Forward BFS from a principal (SID or `DOMAIN\name`); implies `--paths`.
 
-**"Who has dangerous rights over objects?" — ACL abuse**
+**"Who has dangerous rights over objects?" - ACL abuse**
 
 ```
 Kestrel.exe --acl            # delegated GenericAll/WriteDacl/WriteOwner/DCSync (baseline-filtered)
@@ -100,13 +100,13 @@ Kestrel.exe --acl --acl-raw  # raw ACLs, no default-ACL suppression
 
 Includes DCSync holders and RBCD-weaponizable / cross-forest (`[FOREIGN]`) writes on computers.
 
-**"Any delegation abuse?" — unconstrained / constrained / RBCD**
+**"Any delegation abuse?" - unconstrained / constrained / RBCD**
 
 ```
 Kestrel.exe --delegation
 ```
 
-Unconstrained (TGT), constrained (`msDS-AllowedToDelegateTo`), S4U2Self, and RBCD — RBCD grants tagged weaponizable (MAQ > 0) and foreign-SID, with "when configured / from which DSA" provenance.
+Unconstrained (TGT), constrained (`msDS-AllowedToDelegateTo`), S4U2Self, and RBCD - RBCD grants tagged weaponizable (MAQ > 0) and foreign-SID, with "when configured / from which DSA" provenance.
 
 **"Kerberoast / AS-REP targets?"**
 
@@ -114,7 +114,7 @@ Unconstrained (TGT), constrained (`msDS-AllowedToDelegateTo`), S4U2Self, and RBC
 Kestrel.exe --roast
 ```
 
-**"Any planted persistence?" — shadow credentials**
+**"Any planted persistence?" - shadow credentials**
 
 ```
 Kestrel.exe --shadowcreds
@@ -122,7 +122,23 @@ Kestrel.exe --shadowcreds
 
 Objects carrying `msDS-KeyCredentialLink`, decoded to key usage + creation time, with "when set / from which DSA" provenance. User/service accounts, `adminCount=1` holders, and keys added in the last 90 days are flagged (computers carry device keys legitimately).
 
-**"Certificate escalation?" — ADCS ESC1-5/9**
+**"Any injected SID history?" - stealthy escalation / persistence**
+
+```
+Kestrel.exe --sidhistory
+```
+
+Objects with a populated `sIDHistory`, each historical SID classified: `[PRIVILEGED]` (a well-known admin SID injected for stealthy escalation, local or cross-forest) or `[FOREIGN]` (a SID from another domain/forest). Each carries "when injected / from which DSA" provenance, and feeds the graph as a `HasSIDHistory` edge.
+
+**"Any orphaned admin markers?" - AdminSDHolder residue**
+
+```
+Kestrel.exe --adminsdholder
+```
+
+`adminCount=1` objects that are no longer a member of any protected group - orphaned SDProp markers with a frozen, non-inheriting security descriptor (residual privileged posture, a classic backdoor-marker hiding spot). Cross-references transitive membership of the real protected-group set; each orphan carries `nTSecurityDescriptor` provenance. (Dangerous ACEs planted on the AdminSDHolder object itself surface through `--acl`.)
+
+**"Certificate escalation?" - ADCS ESC1-5/9**
 
 ```
 Kestrel.exe --adcs
@@ -134,7 +150,7 @@ Kestrel.exe --adcs
 Kestrel.exe --gmsa
 ```
 
-**"Cleartext creds in SYSVOL?" — GPP cpassword**
+**"Cleartext creds in SYSVOL?" - GPP cpassword**
 
 ```
 Kestrel.exe --gpp
@@ -148,7 +164,7 @@ Kestrel.exe --trust
 
 SID-filtering gaps on inbound external trusts, TGT delegation across a trust, RC4.
 
-**"Privileged group membership — and who was added recently?"**
+**"Privileged group membership - and who was added recently?"**
 
 ```
 Kestrel.exe --groups
@@ -164,14 +180,14 @@ Kestrel.exe --policy
 
 LLMNR/NBT-NS/WDigest/NTLMv1, LDAP + SMB signing, anonymous LDAP, Onelogon allow-list, and DA-equivalent User Rights (`SeBackup`/`SeDebug`/…).
 
-**"Password-hygiene surface?" — LAPS + stale**
+**"Password-hygiene surface?" - LAPS + stale**
 
 ```
 Kestrel.exe --laps    # coverage + rotation anomalies (expired / future-dated / dual-schema)
 Kestrel.exe --stale   # dormant computers via lastLogonTimestamp
 ```
 
-**"Recon surface exposed?" — ADWS + topology**
+**"Recon surface exposed?" - ADWS + topology**
 
 ```
 Kestrel.exe --adws       # ADWS endpoint per DC (9389/TCP)
@@ -180,7 +196,7 @@ Kestrel.exe --topology   # computer inventory + services via SPN
 
 ### Output & continuous audit
 
-**Shareable / machine-readable report** — format chosen by extension:
+**Shareable / machine-readable report** - format chosen by extension:
 
 ```
 Kestrel.exe --report C:\out\report.html   # interactive D3 force graph
@@ -188,7 +204,7 @@ Kestrel.exe --report C:\out\graph.json     # JSON
 Kestrel.exe --report C:\out\graph.yaml     # YAML
 ```
 
-**Feed into BloodHound CE** — OpenGraph export:
+**Feed into BloodHound CE** - OpenGraph export:
 
 ```
 Kestrel.exe --opengraph C:\out\kestrel.json
@@ -196,7 +212,7 @@ Kestrel.exe --opengraph C:\out\kestrel.json
 
 Import via **BloodHound CE → Administration → File Ingest**. Every Kestrel edge (including RBCD-weaponizable, foreign-SID, `ADCS_ESC`, `Trusts`) becomes queryable in Cypher. Tagged `source_kind: Kestrel` for one-click cleanup.
 
-**"What changed since last time?" — diff over time**
+**"What changed since last time?" - diff over time**
 
 ```
 Kestrel.exe --report C:\snap\week1.json                            # baseline snapshot
@@ -205,7 +221,7 @@ Kestrel.exe --report C:\snap\week2.json --diff C:\snap\week1.json  # new run + d
 
 Surfaces **new / removed** attack-path edges (new GenericAll, new RBCD, new ESC, new privileged membership) since the snapshot; new edges into Tier-0 are flagged.
 
-**Everything at once** — full sweep, HTML for humans, OpenGraph for BloodHound:
+**Everything at once** - full sweep, HTML for humans, OpenGraph for BloodHound:
 
 ```
 Kestrel.exe --report C:\out\report.html --opengraph C:\out\kestrel.json
@@ -227,6 +243,8 @@ Kestrel.exe --report C:\out\report.html --opengraph C:\out\kestrel.json
 | `--from <prin>`  | Paths FROM a principal (SID/name); implies `--paths`               |
 | `--roast`        | Kerberoastable + AS-REP Roastable                                   |
 | `--shadowcreds`  | Shadow credentials (`msDS-KeyCredentialLink`)                       |
+| `--sidhistory`   | sIDHistory enumeration (privileged / foreign SID injection)        |
+| `--adminsdholder`| Orphaned `adminCount=1` objects (AdminSDHolder residue)            |
 | `--trust`        | Domain/forest trust posture                                        |
 | `--gmsa`         | gMSA password-reader enumeration                                   |
 | `--adcs`         | ADCS certificate-template / CA audit (ESC1-5/9)                     |
@@ -290,7 +308,7 @@ High-value groups are located by **well-known SID**, not by name - locale-indepe
 
 After expansion, cross-references group membership against ACL edges from v0.2 to surface attack paths: `member → [via group] → EdgeType → target`.
 
-**Provenance** (`KestrelProvenance.c`). For each high-value group, Kestrel reads the constructed `msDS-ReplValueMetaData` attribute (per-member replication metadata) and surfaces members **added within the last 90 days** - with the add time and the **originating DSA**. Recently-added privileged members are a classic persistence signal that raw membership does not reveal. The attribute is readable by anyone who can read the object (*not* gated by DS-Replication-Get-Changes / DCSync), is requested per-object (targeted, small footprint), and degrades silently if unavailable. The same primitive also runs single-attribute (`msDS-ReplAttributeMetaData`) provenance on high-value findings — when an object's DACL (`nTSecurityDescriptor`), an RBCD grant, or a shadow-credential key was last written, and from which DSA.
+**Provenance** (`KestrelProvenance.c`). For each high-value group, Kestrel reads the constructed `msDS-ReplValueMetaData` attribute (per-member replication metadata) and surfaces members **added within the last 90 days** - with the add time and the **originating DSA**. Recently-added privileged members are a classic persistence signal that raw membership does not reveal. The attribute is readable by anyone who can read the object (*not* gated by DS-Replication-Get-Changes / DCSync), is requested per-object (targeted, small footprint), and degrades silently if unavailable. The same primitive also runs single-attribute (`msDS-ReplAttributeMetaData`) provenance on high-value findings - when an object's DACL (`nTSecurityDescriptor`), an RBCD grant, or a shadow-credential key was last written, and from which DSA.
 
 ### v0.4 In-memory graph + report (`KestrelReport.c`)
 
@@ -302,12 +320,13 @@ Folded into the same graph:
 - **Roastable node flags** - Kerberoastable / AS-REP Roastable marked as node properties.
 - **Trust edges** - `Trusts` (local domain → trusted domain), carrying direction and SID-filtering status.
 - **ADCS escalation edges** - `ADCS_ESC` (enrollee/writer → domain), labelled with the ESC class and template, so certificate paths join the same graph as ACL and membership.
+- **SID-history edges** - `HasSIDHistory` (holder → the SID it carries), so injected privileged/foreign SIDs become a first-class path in the graph.
 
 Exports to a self-contained interactive **HTML** report (D3.js force graph with filtering and a node detail panel), **JSON**, and **YAML** - format chosen by output extension. All serialization is written with `fputs`, never `printf`-family, to sidestep MSVC `C4477` format-string pitfalls in CSS/JSON output.
 
-**BloodHound CE export** (`--opengraph`, `KestrelWriteOpenGraph`): the same in-memory graph is emitted as OpenGraph generic nodes/edges JSON, keyed by SID, with Kestrel's edge types mapped to canonical BloodHound kinds (`GenericAll`, `MemberOf`, `AllowedToAct`, `ReadGMSAPassword`, …) where they map and descriptive names otherwise. Tagged `source_kind: Kestrel`. Import via File Ingest for Cypher over Kestrel's graph — including edges SharpHound does not produce (RBCD-weaponizable, foreign-SID, `ADCS_ESC`).
+**BloodHound CE export** (`--opengraph`, `KestrelWriteOpenGraph`): the same in-memory graph is emitted as OpenGraph generic nodes/edges JSON, keyed by SID, with Kestrel's edge types mapped to canonical BloodHound kinds (`GenericAll`, `MemberOf`, `AllowedToAct`, `ReadGMSAPassword`, …) where they map and descriptive names otherwise. Tagged `source_kind: Kestrel`. Import via File Ingest for Cypher over Kestrel's graph - including edges SharpHound does not produce (RBCD-weaponizable, foreign-SID, `ADCS_ESC`).
 
-**Diff over time** (`--diff`, `KestrelDiff.c`): compares the current graph against a previous Kestrel `.json` snapshot and reports new / removed attack-path edges, keyed by `(sourceSID · type · targetSID)` so run-to-run node re-indexing never creates false diffs. New edges into Tier-0 are flagged — a continuous-audit signal with no new directory reads.
+**Diff over time** (`--diff`, `KestrelDiff.c`): compares the current graph against a previous Kestrel `.json` snapshot and reports new / removed attack-path edges, keyed by `(sourceSID · type · targetSID)` so run-to-run node re-indexing never creates false diffs. New edges into Tier-0 are flagged - a continuous-audit signal with no new directory reads.
 
 ### v0.5 Attack-path finder (`KestrelPath.c`)
 
@@ -339,11 +358,21 @@ Detection only - no ticket is ever requested. Findings are also folded into the 
 
 ### Shadow credentials (`KestrelShadowCreds.c`)
 
-Detects planted **shadow credentials** — the persistence half of the PKINIT / Whisker attack, invisible to ACL analysis because the artifact is an attribute value, not an ACE. Enumerates every object with a populated `msDS-KeyCredentialLink` and decodes each `KEYCREDENTIALLINK_BLOB` (MS-ADTS 2.2.20) to its key usage (`NGC` is the WHfB / attacker key type) and creation time. A key credential on a *computer* is usually a legitimate device key; one on a *user*, service, or `adminCount=1` account is the classic shadow-credential signal and is flagged, as are keys created in the last 90 days. Each object also carries `msDS-KeyCredentialLink` provenance (when the value was written, and from which DSA). Read-only, ordinary user — ADSI hands back the DN-Binary value already separated from the owner DN and hex-decoded.
+Detects planted **shadow credentials** - the persistence half of the PKINIT / Whisker attack, invisible to ACL analysis because the artifact is an attribute value, not an ACE. Enumerates every object with a populated `msDS-KeyCredentialLink` and decodes each `KEYCREDENTIALLINK_BLOB` (MS-ADTS 2.2.20) to its key usage (`NGC` is the WHfB / attacker key type) and creation time. A key credential on a *computer* is usually a legitimate device key; one on a *user*, service, or `adminCount=1` account is the classic shadow-credential signal and is flagged, as are keys created in the last 90 days. Each object also carries `msDS-KeyCredentialLink` provenance (when the value was written, and from which DSA). Read-only, ordinary user - ADSI hands back the DN-Binary value already separated from the owner DN and hex-decoded.
+
+### SID history (`KestrelSidHistory.c`)
+
+Enumerates every object with a populated `sIDHistory` and classifies each historical SID. A **privileged** SID (a well-known admin RID - DA/EA/Schema/DCs/RODCs/Key Admins/krbtgt, or a BUILTIN admin alias - in any domain, so cross-forest injection is caught) is a stealthy-escalation signal: it grants that access on every logon with no group membership and no ACE. A **foreign** SID (from another domain/forest) is the migration/cross-forest case, the pair to the foreign-SID RBCD finding. Each holder carries `sIDHistory` provenance (when injected, from which DSA), and each historical SID becomes a `HasSIDHistory` edge in the graph.
+
+### Orphaned adminCount (`KestrelAdminSDHolder.c`)
+
+SDProp stamps `adminCount=1` and disables ACE inheritance on members of protected groups; when an object is later removed from the group, the marker and the frozen, non-inheriting security descriptor are **not** rolled back and no event is written. This scan builds the set of currently-protected principals - the SDProp-protected groups, their transitive members (`LDAP_MATCHING_RULE_IN_CHAIN`), and the protected users Administrator/krbtgt - and flags every `adminCount=1` object that is no longer in it. Such an orphan carries residual privileged ACL posture and a stealthy non-inheriting SD, and is a classic hiding spot for a planted backdoor marker; each gets `nTSecurityDescriptor` provenance. The other AdminSDHolder axis - dangerous ACEs planted on the `CN=AdminSDHolder` / `CN=System` objects themselves - is already surfaced by the ACL scan, which walks the whole domain NC subtree.
 
 ### v0.7 Domain trust posture (`KestrelTrust.c`)
 
 Enumerates `trustedDomain` objects and decodes direction, type, and `trustAttributes`. Flags missing SID filtering on **inbound external** trusts (the classic sIDHistory-injection surface), TGT delegation across a trust, and RC4. Within-forest and forest-transitive trusts are excluded from the SID-filter check - they filter by default, so flagging them would be a false positive. Since v0.10 trusts also feed the graph as domain→domain `Trusts` edges.
+
+For every **incoming** trust the trust account (`<flatName>$`) lives locally, and its keys can be extracted from the trusting side to request a TGT here - a one-way-trust weakness whose only real mitigation is an Authentication Policy assigned to that account. Kestrel reads the trust account's `msDS-AssignedAuthNPolicy` and flags `VULN: trust-acct no AuthN Policy (TGT abuse)` when it is unset, and reads `primaryGroupID` (legacy `513` vs the Server 2025 `528`/`529`) as context. Per Jorge's forest-boundary analysis, the 2025 group change alone does **not** block the attack - only the policy does - so the policy drives the verdict.
 
 ### v0.7 gMSA password readers (`KestrelGMSA.c`)
 
@@ -389,6 +418,7 @@ Not a scan but a filter for the ACL module. It builds a baseline of "expected" A
 | v0.9    | ✅      | LAPS health anomalies · SMB signing (NTLM relay) · Anonymous LDAP posture · description leak scan |
 | v0.10   | ✅      | MAQ + RBCD weaponizability · cross-forest RBCD (foreign SID) · dangerous User Rights + built-in groups (operators / DnsAdmins) · Trust/ADCS graph edges · replication-metadata provenance |
 | v0.11   | ✅      | BloodHound CE OpenGraph export · diff-over-time on JSON snapshots · single-attribute provenance (ACL / RBCD / shadow-cred) · shadow-credential detection (`msDS-KeyCredentialLink`) |
+| v0.12   | ✅      | SID-history edges + injection classification · orphaned adminCount (AdminSDHolder) · trust-account AuthN Policy check (Server 2025 one-way-trust weakness) |
 | -       | 🔲      | ADExplorer `.dat` snapshot as an offline input source                       |
 
 ## Screens

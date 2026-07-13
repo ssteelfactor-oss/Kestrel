@@ -75,6 +75,8 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunRPC;       /* v0.5                         */
     BOOL bRunRoast;     /* v0.6 Kerberoast / AS-REP     */
     BOOL bRunShadowCreds; /* shadow credentials (KeyCredentialLink) */
+    BOOL bRunSidHistory;  /* sIDHistory enumeration                 */
+    BOOL bRunAdminSDHolder; /* orphaned adminCount (AdminSDHolder)  */
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
@@ -263,7 +265,8 @@ typedef enum _KESTREL_GRAPH_EDGE_TYPE {
     GEDGE_CAN_READ_LAPS,
     GEDGE_CAN_READ_GMSA_PASSWORD,  /* 12 — v0.7 */
     GEDGE_TRUSTS,                  /* 13 — domain → trusted domain */
-    GEDGE_ADCS_ESC                 /* 14 — principal → domain (cert escalation) */
+    GEDGE_ADCS_ESC,                /* 14 — principal → domain (cert escalation) */
+    GEDGE_HAS_SID_HISTORY          /* 15 — principal → SID carried in sIDHistory */
 } KESTREL_GRAPH_EDGE_TYPE;
 
 typedef struct _KESTREL_GRAPH_NODE {
@@ -306,6 +309,7 @@ typedef struct _KESTREL_GRAPH {
     DWORD                     cGmsaEdges;
     DWORD                     cTrustEdges;
     DWORD                     cAdcsEdges;
+    DWORD                     cSidHistEdges;
 } KESTREL_GRAPH;
 
 typedef enum _KESTREL_REPORT_FORMAT {
@@ -382,6 +386,9 @@ typedef struct _KESTREL_TRUST_FINDING {
     BOOL                    bRC4;
     BOOL                    bTgtDelegEnabled;
     BOOL                    bTreatAsExternal;
+    BOOL                    bTrustAcctChecked;      /* W2K25: trust-account posture read */
+    BOOL                    bTrustAcctNoAuthPolicy; /* no msDS-AssignedAuthNPolicy → TGT abuse */
+    DWORD                   dwTrustAcctPGID;        /* primaryGroupID: 513 legacy vs 528/529 */
     WCHAR                   wszRisk[256];
 } KESTREL_TRUST_FINDING;
 
@@ -393,6 +400,24 @@ typedef struct _KESTREL_TRUST_SCAN_RESULT {
     DWORD                  cRisky;
     DWORD                  cObjectsScanned;
 } KESTREL_TRUST_SCAN_RESULT;
+
+/* One historical SID carried by one principal. */
+typedef struct _KESTREL_SIDHIST_FINDING {
+    WCHAR              wszHolderSid[96];
+    WCHAR              wszHolderLabel[128];
+    WCHAR              wszHistSid[96];
+    KESTREL_NODE_CLASS HolderClass;
+    BOOL               bPrivileged;   /* injected privileged SID (stealthy escalation) */
+    BOOL               bForeign;      /* SID from another domain/forest */
+} KESTREL_SIDHIST_FINDING;
+
+typedef struct _KESTREL_SIDHISTORY_SCAN_RESULT {
+    KESTREL_SIDHIST_FINDING *rgFindings;
+    DWORD                    cFindings;
+    DWORD                    cCapacity;
+    DWORD                    cObjects;
+    DWORD                    cPrivileged;
+} KESTREL_SIDHISTORY_SCAN_RESULT;
 
 /* ════════════════════════════════════════════════════════════════════════════
  * Shared types — KestrelGMSA.c (v0.7)
@@ -678,6 +703,28 @@ VOID KestrelFreeRoastScanResult(
  * provenance. Prints directly; returns S_OK on completion. */
 _Must_inspect_result_
 HRESULT KestrelRunShadowCredScan(
+    _In_z_ LPCWSTR pwszDomainNC);
+
+/* Enumerate objects with a populated sIDHistory, classify each historical SID
+ * (privileged / foreign), print + provenance, and return findings for the graph. */
+_Must_inspect_result_
+HRESULT KestrelRunSidHistoryScan(
+    _In_z_   LPCWSTR                          pwszDomainNC,
+    _Outptr_ KESTREL_SIDHISTORY_SCAN_RESULT **ppResult);
+
+VOID KestrelFreeSidHistoryScanResult(
+    _In_opt_ KESTREL_SIDHISTORY_SCAN_RESULT *pResult);
+
+/* Add HasSIDHistory edges (holder → carried SID) to an already-built graph. */
+_Must_inspect_result_
+HRESULT KestrelGraphAddSidHistoryEdges(
+    _Inout_ KESTREL_GRAPH                  *pGraph,
+    _In_    KESTREL_SIDHISTORY_SCAN_RESULT *pResult);
+
+/* Flag adminCount=1 objects no longer in any protected group (orphaned SDProp
+ * markers — residual privileged posture). Prints + provenance; returns S_OK. */
+_Must_inspect_result_
+HRESULT KestrelRunAdminSDHolderScan(
     _In_z_ LPCWSTR pwszDomainNC);
 
 /* ════════════════════════════════════════════════════════════════════════════
