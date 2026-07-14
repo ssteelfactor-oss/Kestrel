@@ -70,6 +70,7 @@ KestrelPrintHelp(VOID)
         L"  --shadowcreds  Shadow credentials (msDS-KeyCredentialLink) detection\n"
         L"  --sidhistory   sIDHistory enumeration (privileged / foreign SID injection)\n"
         L"  --adminsdholder  Orphaned adminCount=1 objects (AdminSDHolder)\n"
+        L"  --pwdpolicy    Password policy + PSO · krbtgt age · MachineAccountQuota\n"
         L"  --trust        Domain/forest trust posture audit\n"
         L"  --gmsa         gMSA password reader enumeration\n"
         L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
@@ -112,6 +113,7 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunShadowCreds = TRUE;
     pCfg->bRunSidHistory  = TRUE;
     pCfg->bRunAdminSDHolder = TRUE;
+    pCfg->bRunPwdPolicy   = TRUE;
     pCfg->bRunTrust      = TRUE;
     pCfg->bRunGMSA       = TRUE;
     pCfg->bRunADCS       = TRUE;
@@ -268,6 +270,11 @@ KestrelParseArgs(
         }
         if (_wcsicmp(arg, L"--adminsdholder") == 0) {
             pCfg->bRunAdminSDHolder = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--pwdpolicy") == 0) {
+            pCfg->bRunPwdPolicy = TRUE;
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -478,6 +485,14 @@ int wmain(int argc, wchar_t *argv[])
         hr = KestrelRunAdminSDHolderScan(wszDomainNC);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunAdminSDHolderScan failed: 0x%08X\n", hr);
+    }
+
+    /* ── entry-condition posture (password policy / PSO / krbtgt / MAQ) ── */
+    if (cfg.bRunPwdPolicy) {
+        wprintf(L"\n═══ Kestrel — Password Policy & Entry-Condition Posture ═══\n\n");
+        hr = KestrelRunPwdPolicyScan(wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunPwdPolicyScan failed: 0x%08X\n", hr);
     }
 
     /* ── v0.7: domain trust posture audit ────────────────────────── */

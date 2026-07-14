@@ -138,6 +138,14 @@ Kestrel.exe --adminsdholder
 
 `adminCount=1` objects that are no longer a member of any protected group - orphaned SDProp markers with a frozen, non-inheriting security descriptor (residual privileged posture, a classic backdoor-marker hiding spot). Cross-references transitive membership of the real protected-group set; each orphan carries `nTSecurityDescriptor` provenance. (Dangerous ACEs planted on the AdminSDHolder object itself surface through `--acl`.)
 
+**"Is the domain spray-friendly?" - entry-condition posture**
+
+```
+Kestrel.exe --pwdpolicy
+```
+
+The preconditions an attacker checks before the first credential: the default domain password policy (`lockoutThreshold=0` → `[SPRAY-SAFE]`, weak length / no complexity / non-expiring passwords), Fine-Grained PSOs (per-principal overrides often weaker than the default, with who they apply to), krbtgt password age (`[CRITICAL]` when the key hasn't rotated - Golden Ticket exposure), and `ms-DS-MachineAccountQuota > 0` (noPac / Certifried enabler).
+
 **"Certificate escalation?" - ADCS ESC1-5/9**
 
 ```
@@ -245,6 +253,7 @@ Kestrel.exe --report C:\out\report.html --opengraph C:\out\kestrel.json
 | `--shadowcreds`  | Shadow credentials (`msDS-KeyCredentialLink`)                       |
 | `--sidhistory`   | sIDHistory enumeration (privileged / foreign SID injection)        |
 | `--adminsdholder`| Orphaned `adminCount=1` objects (AdminSDHolder residue)            |
+| `--pwdpolicy`    | Password policy + PSO · krbtgt age · MachineAccountQuota (noPac)   |
 | `--trust`        | Domain/forest trust posture                                        |
 | `--gmsa`         | gMSA password-reader enumeration                                   |
 | `--adcs`         | ADCS certificate-template / CA audit (ESC1-5/9)                     |
@@ -368,6 +377,10 @@ Enumerates every object with a populated `sIDHistory` and classifies each histor
 
 SDProp stamps `adminCount=1` and disables ACE inheritance on members of protected groups; when an object is later removed from the group, the marker and the frozen, non-inheriting security descriptor are **not** rolled back and no event is written. This scan builds the set of currently-protected principals - the SDProp-protected groups, their transitive members (`LDAP_MATCHING_RULE_IN_CHAIN`), and the protected users Administrator/krbtgt - and flags every `adminCount=1` object that is no longer in it. Such an orphan carries residual privileged ACL posture and a stealthy non-inheriting SD, and is a classic hiding spot for a planted backdoor marker; each gets `nTSecurityDescriptor` provenance. The other AdminSDHolder axis - dangerous ACEs planted on the `CN=AdminSDHolder` / `CN=System` objects themselves - is already surfaced by the ACL scan, which walks the whole domain NC subtree.
 
+### Password policy & entry-condition posture (`KestrelPwdPolicy.c`)
+
+The preconditions that precede the first credential. The **default domain password policy** is read from the NC head - `lockoutThreshold == 0` flags the domain `[SPRAY-SAFE]` (password spraying is unthrottled), with weak `minPwdLength`, disabled complexity, and non-expiring `maxPwdAge` as supporting notes. **Fine-Grained Password Policies** (`msDS-PasswordSettings` objects) are enumerated with their precedence, thresholds, and `msDS-PSOAppliesTo` targets - per-principal overrides are frequently weaker than the domain default and applied to service accounts. **krbtgt password age** (`pwdLastSet` on `krbtgt` and RODC `krbtgt_*`) is flagged `[CRITICAL]` when the key has not rotated - a leaked hash still forges valid Golden Tickets. And **`ms-DS-MachineAccountQuota > 0`** is surfaced as the noPac (CVE-2021-42278/42287) and Certifried (CVE-2022-26923) enabler. Read-only: one base read of the domain object, one krbtgt search, one PSO-container enumeration.
+
 ### v0.7 Domain trust posture (`KestrelTrust.c`)
 
 Enumerates `trustedDomain` objects and decodes direction, type, and `trustAttributes`. Flags missing SID filtering on **inbound external** trusts (the classic sIDHistory-injection surface), TGT delegation across a trust, and RC4. Within-forest and forest-transitive trusts are excluded from the SID-filter check - they filter by default, so flagging them would be a false positive. Since v0.10 trusts also feed the graph as domain→domain `Trusts` edges.
@@ -419,7 +432,13 @@ Not a scan but a filter for the ACL module. It builds a baseline of "expected" A
 | v0.10   | ✅      | MAQ + RBCD weaponizability · cross-forest RBCD (foreign SID) · dangerous User Rights + built-in groups (operators / DnsAdmins) · Trust/ADCS graph edges · replication-metadata provenance |
 | v0.11   | ✅      | BloodHound CE OpenGraph export · diff-over-time on JSON snapshots · single-attribute provenance (ACL / RBCD / shadow-cred) · shadow-credential detection (`msDS-KeyCredentialLink`) |
 | v0.12   | ✅      | SID-history edges + injection classification · orphaned adminCount (AdminSDHolder) · trust-account AuthN Policy check (Server 2025 one-way-trust weakness) |
-| -       | 🔲      | ADExplorer `.dat` snapshot as an offline input source                       |
+| v0.13   | ✅      | **Entry-condition posture** — domain password policy + Fine-Grained PSOs (spray-friendliness) · krbtgt password age (Golden Ticket exposure) · noPac / Certifried surfacing from MachineAccountQuota |
+| v0.14   | 🔲      | **ACL depth + lateral edges** — fine-grained dangerous ACEs (`ForceChangePassword` / `WriteSPN` / `AddKeyCredentialLink` / `AddSelf`) · GPO→lateral edges (`AdminTo` / `CanRDP` / `CanPSRemote` / `ExecuteDCOM`) · password-hygiene triad (`PASSWD_NOTREQD` / `DONT_EXPIRE_PASSWORD` / description passwords) |
+| v0.15   | 🔲      | **Stealth persistence + SYSVOL/ADCS depth** — hidden-object / OWNER RIGHTS (`S-1-3-4`) deny-ACE persistence · unattend.xml + SYSVOL secret sweep · ADCS persistence (template validity + NTAuth store) |
+| v0.16   | 🔲      | **Cross-domain + hybrid footprint** — foreign security principals in privileged groups · Entra Connect (`MSOL_` / `AAD_`) Tier-0 tagging · ADFS DKM key ACL (Golden SAML precondition) |
+| v0.17   | 🔲      | **Query hygiene + honest footprint** — minimal `SDflags` / security-mask · attribute-list & filter-indexability audit · "Detection footprint" documentation (how each scan appears in event 1644) |
+| v1.0    | 🔲      | Feature-complete for the on-prem, directory-side posture mission |
+| post-1.0 | 🔲     | ADExplorer `.dat` snapshot as an offline input source (optional; touches the data-source layer) |
 
 ## Screens
 

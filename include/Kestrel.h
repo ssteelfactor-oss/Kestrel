@@ -77,6 +77,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunShadowCreds; /* shadow credentials (KeyCredentialLink) */
     BOOL bRunSidHistory;  /* sIDHistory enumeration                 */
     BOOL bRunAdminSDHolder; /* orphaned adminCount (AdminSDHolder)  */
+    BOOL bRunPwdPolicy;   /* password policy + PSO + krbtgt + MAQ   */
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
@@ -725,6 +726,13 @@ HRESULT KestrelGraphAddSidHistoryEdges(
  * markers — residual privileged posture). Prints + provenance; returns S_OK. */
 _Must_inspect_result_
 HRESULT KestrelRunAdminSDHolderScan(
+    _In_z_ LPCWSTR pwszDomainNC);
+
+/* Entry-condition posture: default domain password policy + Fine-Grained PSOs
+ * (spray-friendliness), krbtgt password age (Golden Ticket exposure), and
+ * MachineAccountQuota (noPac / Certifried enabler). Prints; returns S_OK. */
+_Must_inspect_result_
+HRESULT KestrelRunPwdPolicyScan(
     _In_z_ LPCWSTR pwszDomainNC);
 
 /* ════════════════════════════════════════════════════════════════════════════
