@@ -78,6 +78,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunSidHistory;  /* sIDHistory enumeration                 */
     BOOL bRunAdminSDHolder; /* orphaned adminCount (AdminSDHolder)  */
     BOOL bRunPwdPolicy;   /* password policy + PSO + krbtgt + MAQ   */
+    BOOL bRunHygiene;     /* credential hygiene (UAC flags + desc)  */
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
@@ -733,6 +734,13 @@ HRESULT KestrelRunAdminSDHolderScan(
  * MachineAccountQuota (noPac / Certifried enabler). Prints; returns S_OK. */
 _Must_inspect_result_
 HRESULT KestrelRunPwdPolicyScan(
+    _In_z_ LPCWSTR pwszDomainNC);
+
+/* Credential-hygiene sweep: PASSWD_NOTREQD / DONT_EXPIRE_PASSWORD / reversible
+ * encryption (userAccountControl) + secret-like text in description/info.
+ * Prints; returns S_OK. */
+_Must_inspect_result_
+HRESULT KestrelRunHygieneScan(
     _In_z_ LPCWSTR pwszDomainNC);
 
 /* ════════════════════════════════════════════════════════════════════════════

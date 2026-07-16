@@ -71,6 +71,7 @@ KestrelPrintHelp(VOID)
         L"  --sidhistory   sIDHistory enumeration (privileged / foreign SID injection)\n"
         L"  --adminsdholder  Orphaned adminCount=1 objects (AdminSDHolder)\n"
         L"  --pwdpolicy    Password policy + PSO · krbtgt age · MachineAccountQuota\n"
+        L"  --hygiene      Credential hygiene (PASSWD_NOTREQD / DONT_EXPIRE / reversible / desc)\n"
         L"  --trust        Domain/forest trust posture audit\n"
         L"  --gmsa         gMSA password reader enumeration\n"
         L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
@@ -114,6 +115,7 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunSidHistory  = TRUE;
     pCfg->bRunAdminSDHolder = TRUE;
     pCfg->bRunPwdPolicy   = TRUE;
+    pCfg->bRunHygiene     = TRUE;
     pCfg->bRunTrust      = TRUE;
     pCfg->bRunGMSA       = TRUE;
     pCfg->bRunADCS       = TRUE;
@@ -275,6 +277,11 @@ KestrelParseArgs(
         }
         if (_wcsicmp(arg, L"--pwdpolicy") == 0) {
             pCfg->bRunPwdPolicy = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--hygiene") == 0) {
+            pCfg->bRunHygiene = TRUE;
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -493,6 +500,14 @@ int wmain(int argc, wchar_t *argv[])
         hr = KestrelRunPwdPolicyScan(wszDomainNC);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunPwdPolicyScan failed: 0x%08X\n", hr);
+    }
+
+    /* ── credential hygiene (UAC flags + description secrets) ──────── */
+    if (cfg.bRunHygiene) {
+        wprintf(L"\n═══ Kestrel — Credential Hygiene ═══\n\n");
+        hr = KestrelRunHygieneScan(wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunHygieneScan failed: 0x%08X\n", hr);
     }
 
     /* ── v0.7: domain trust posture audit ────────────────────────── */

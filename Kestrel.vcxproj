@@ -136,6 +136,7 @@
     <ClCompile Include="code\KestrelGMSA.c" />
     <ClCompile Include="code\KestrelGPP.c" />
     <ClCompile Include="code\KestrelGroup.c" />
+    <ClCompile Include="code\KestrelHygiene.c" />
     <ClCompile Include="code\KestrelPath.c" />
     <ClCompile Include="code\KestrelPolicy.c" />
     <ClCompile Include="code\KestrelProvenance.c" />

@@ -146,6 +146,14 @@ Kestrel.exe --pwdpolicy
 
 The preconditions an attacker checks before the first credential: the default domain password policy (`lockoutThreshold=0` → `[SPRAY-SAFE]`, weak length / no complexity / non-expiring passwords), Fine-Grained PSOs (per-principal overrides often weaker than the default, with who they apply to), krbtgt password age (`[CRITICAL]` when the key hasn't rotated - Golden Ticket exposure), and `ms-DS-MachineAccountQuota > 0` (noPac / Certifried enabler).
 
+**"Any weak-credential accounts?" - credential hygiene**
+
+```
+Kestrel.exe --hygiene
+```
+
+Accounts whose `userAccountControl` widens the credential surface: `PASSWD_NOTREQD` (empty password possible - flagged hard on enabled accounts), `DONT_EXPIRE_PASSWORD` (password never rotates), and `ENCRYPTED_TEXT_PWD_ALLOWED` (reversible encryption - plaintext recoverable from NTDS), plus secret-like text in `description` / `info`. Enabled and `adminCount=1` accounts are highlighted.
+
 **"Certificate escalation?" - ADCS ESC1-5/9**
 
 ```
@@ -254,6 +262,7 @@ Kestrel.exe --report C:\out\report.html --opengraph C:\out\kestrel.json
 | `--sidhistory`   | sIDHistory enumeration (privileged / foreign SID injection)        |
 | `--adminsdholder`| Orphaned `adminCount=1` objects (AdminSDHolder residue)            |
 | `--pwdpolicy`    | Password policy + PSO · krbtgt age · MachineAccountQuota (noPac)   |
+| `--hygiene`      | Credential hygiene (`PASSWD_NOTREQD` / `DONT_EXPIRE` / reversible / description) |
 | `--trust`        | Domain/forest trust posture                                        |
 | `--gmsa`         | gMSA password-reader enumeration                                   |
 | `--adcs`         | ADCS certificate-template / CA audit (ESC1-5/9)                     |
@@ -380,6 +389,10 @@ SDProp stamps `adminCount=1` and disables ACE inheritance on members of protecte
 ### Password policy & entry-condition posture (`KestrelPwdPolicy.c`)
 
 The preconditions that precede the first credential. The **default domain password policy** is read from the NC head - `lockoutThreshold == 0` flags the domain `[SPRAY-SAFE]` (password spraying is unthrottled), with weak `minPwdLength`, disabled complexity, and non-expiring `maxPwdAge` as supporting notes. **Fine-Grained Password Policies** (`msDS-PasswordSettings` objects) are enumerated with their precedence, thresholds, and `msDS-PSOAppliesTo` targets - per-principal overrides are frequently weaker than the domain default and applied to service accounts. **krbtgt password age** (`pwdLastSet` on `krbtgt` and RODC `krbtgt_*`) is flagged `[CRITICAL]` when the key has not rotated - a leaked hash still forges valid Golden Tickets. And **`ms-DS-MachineAccountQuota > 0`** is surfaced as the noPac (CVE-2021-42278/42287) and Certifried (CVE-2022-26923) enabler. Read-only: one base read of the domain object, one krbtgt search, one PSO-container enumeration.
+
+### Credential hygiene (`KestrelHygiene.c`)
+
+A cheap `userAccountControl` / attribute sweep for the accounts an attacker sprays and cracks against. `PASSWD_NOTREQD` (0x20) means the account may carry an **empty password** - flagged hard when the account is enabled. `DONT_EXPIRE_PASSWORD` (0x10000) leaves a secret in place indefinitely, and `ENCRYPTED_TEXT_PWD_ALLOWED` (0x80) stores it with **reversible encryption**, recoverable to plaintext from NTDS. Finally, `description` / `info` are checked for secret-like text - a credential typed into an attribute every authenticated user can read. Enabled and `adminCount=1` accounts are highlighted; only accounts with at least one issue are printed.
 
 ### v0.7 Domain trust posture (`KestrelTrust.c`)
 
