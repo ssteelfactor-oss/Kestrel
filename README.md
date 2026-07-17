@@ -154,6 +154,23 @@ Kestrel.exe --hygiene
 
 Accounts whose `userAccountControl` widens the credential surface: `PASSWD_NOTREQD` (empty password possible - flagged hard on enabled accounts), `DONT_EXPIRE_PASSWORD` (password never rotates), and `ENCRYPTED_TEXT_PWD_ALLOWED` (reversible encryption - plaintext recoverable from NTDS), plus secret-like text in `description` / `info`. Enabled and `adminCount=1` accounts are highlighted.
 
+**"Who is local admin where?" - GPO-delivered lateral movement**
+
+```
+Kestrel.exe --gpolateral
+```
+
+Restricted Groups in each GPO's `GptTmpl.inf` push local-group membership onto every computer the GPO applies to. Kestrel maps the privileged local groups to BloodHound's lateral edges - Administrators → `AdminTo`, Remote Desktop Users → `CanRDP`, Remote Management Users → `CanPSRemote`, Distributed COM Users → `ExecuteDCOM` - resolves each GPO's links to the computers in scope, and emits principal → computer edges that become native pathfinding edges in the graph and OpenGraph export.
+
+**"What ACL misconfigurations is nobody checking?" - delegation & ACL structure (ADeleg-class)**
+
+```
+Kestrel.exe --acl        # owner ≠ admin · disabled inheritance · non-canonical order · orphaned trustees · low-priv → Tier-0
+Kestrel.exe --schema     # schema defaultSecurityDescriptor backdoor
+```
+
+Structural checks that catch what a right-by-right blacklist misses, in the spirit of ADeleg: an object **owned by a non-admin** (a hidden GenericAll), an object with **inheritance disabled** (fallen out of the domain's ACL model), a **non-canonical DACL** (ACEs hand-edited out of order), an **ACE for an orphaned trustee** (unresolvable SID left by a deleted account), and - the flagship - any **low-privilege trustee (Everyone / Authenticated Users / Domain Users) with an edge into a Tier-0 resource**. `--schema` separately parses every class's `defaultSecurityDescriptor` and flags one that grants a dangerous right to a low-priv principal - a backdoor that makes every future object of that class born controllable.
+
 **"Certificate escalation?" - ADCS ESC1-5/9**
 
 ```
@@ -263,6 +280,8 @@ Kestrel.exe --report C:\out\report.html --opengraph C:\out\kestrel.json
 | `--adminsdholder`| Orphaned `adminCount=1` objects (AdminSDHolder residue)            |
 | `--pwdpolicy`    | Password policy + PSO · krbtgt age · MachineAccountQuota (noPac)   |
 | `--hygiene`      | Credential hygiene (`PASSWD_NOTREQD` / `DONT_EXPIRE` / reversible / description) |
+| `--gpolateral`   | GPO local-group → lateral edges (`AdminTo`/`CanRDP`/`CanPSRemote`/`ExecuteDCOM`) |
+| `--schema`       | Schema `defaultSecurityDescriptor` audit (schema-level backdoor)   |
 | `--trust`        | Domain/forest trust posture                                        |
 | `--gmsa`         | gMSA password-reader enumeration                                   |
 | `--adcs`         | ADCS certificate-template / CA audit (ESC1-5/9)                     |
@@ -339,6 +358,8 @@ Folded into the same graph:
 - **Trust edges** - `Trusts` (local domain → trusted domain), carrying direction and SID-filtering status.
 - **ADCS escalation edges** - `ADCS_ESC` (enrollee/writer → domain), labelled with the ESC class and template, so certificate paths join the same graph as ACL and membership.
 - **SID-history edges** - `HasSIDHistory` (holder → the SID it carries), so injected privileged/foreign SIDs become a first-class path in the graph.
+- **Fine-grained ACL edges** - object-specific ACEs are classified to their canonical BloodHound kinds: `ForceChangePassword`, `WriteSPN` (targeted Kerberoast), `AddKeyCredentialLink` (shadow credentials), and `AddSelf`, instead of a generic ExtendedRight / WriteProperty.
+- **GPO lateral edges** - `AdminTo` / `CanRDP` / `CanPSRemote` / `ExecuteDCOM` (principal → computer), derived from Restricted-Groups local-group membership and resolved to the computers each GPO applies to.
 
 Exports to a self-contained interactive **HTML** report (D3.js force graph with filtering and a node detail panel), **JSON**, and **YAML** - format chosen by output extension. All serialization is written with `fputs`, never `printf`-family, to sidestep MSVC `C4477` format-string pitfalls in CSS/JSON output.
 
@@ -394,6 +415,16 @@ The preconditions that precede the first credential. The **default domain passwo
 
 A cheap `userAccountControl` / attribute sweep for the accounts an attacker sprays and cracks against. `PASSWD_NOTREQD` (0x20) means the account may carry an **empty password** - flagged hard when the account is enabled. `DONT_EXPIRE_PASSWORD` (0x10000) leaves a secret in place indefinitely, and `ENCRYPTED_TEXT_PWD_ALLOWED` (0x80) stores it with **reversible encryption**, recoverable to plaintext from NTDS. Finally, `description` / `info` are checked for secret-like text - a credential typed into an attribute every authenticated user can read. Enabled and `adminCount=1` accounts are highlighted; only accounts with at least one issue are printed.
 
+### GPO lateral-movement edges (`KestrelGpoLateral.c`)
+
+Restricted Groups in a GPO's `GptTmpl.inf` (`[Group Membership]`) set local-group membership on every computer the GPO applies to - the lateral-movement surface BloodHound models as edges. Kestrel maps the privileged local groups to their canonical kinds (Administrators → `AdminTo`, Remote Desktop Users → `CanRDP`, Remote Management Users → `CanPSRemote`, Distributed COM Users → `ExecuteDCOM`), resolves each GPO's `gPLink` to the OUs that link it, enumerates the computers in those subtrees, and emits a principal → computer edge for each. Read-only LDAP + SYSVOL. Scope note: it resolves "GPO linked to OU → applies to every computer in the subtree" and does **not** yet model block-inheritance, security filtering, WMI filtering, or enforced links, and reads SID-form members only - so edges are candidates in heavily-filtered environments.
+
+### Delegation & ACL structure audit (`KestrelACL.C`, `KestrelSchemaAudit.c`)
+
+A right-by-right blacklist (GenericAll, DCSync, …) misses *structural* ACL problems - the class of issue ADeleg surfaces. Alongside its edge extraction, the ACL scan flags: objects whose **owner is not an admin** (the owner can rewrite the DACL at will - a hidden GenericAll); objects with **DACL inheritance disabled** (`SE_DACL_PROTECTED`), which have quietly fallen out of the domain's inheritance model; **non-canonical DACLs**, where ACEs are out of the canonical deny-before-allow / explicit-before-inherited order (a hand-editing / tampering marker); and **orphaned trustees**, explicit ACEs for a domain SID that no longer resolves. Over the built + Tier-0-tagged graph it then reports every **low-privilege trustee → Tier-0 resource** edge (Everyone / Authenticated Users / Domain Users / Users granted control over a Tier-0 object) - ADeleg's highest-signal view, the `Everyone : FullControl` on the domain root class of finding.
+
+Separately, `--schema` (`KestrelSchemaAudit.c`) reads every `classSchema` object's `defaultSecurityDescriptor` and, rather than diffing against a brittle per-version baseline, parses the SDDL and flags any ACE granting a dangerous right to a low-privilege principal. That default is stamped onto the DACL of every **new** object of the class, so a single edit is a silent, forward-looking, domain-wide backdoor with no ACE on any existing object to find; flagged classes carry `defaultSecurityDescriptor` provenance.
+
 ### v0.7 Domain trust posture (`KestrelTrust.c`)
 
 Enumerates `trustedDomain` objects and decodes direction, type, and `trustAttributes`. Flags missing SID filtering on **inbound external** trusts (the classic sIDHistory-injection surface), TGT delegation across a trust, and RC4. Within-forest and forest-transitive trusts are excluded from the SID-filter check - they filter by default, so flagging them would be a false positive. Since v0.10 trusts also feed the graph as domain→domain `Trusts` edges.
@@ -446,10 +477,11 @@ Not a scan but a filter for the ACL module. It builds a baseline of "expected" A
 | v0.11   | ✅      | BloodHound CE OpenGraph export · diff-over-time on JSON snapshots · single-attribute provenance (ACL / RBCD / shadow-cred) · shadow-credential detection (`msDS-KeyCredentialLink`) |
 | v0.12   | ✅      | SID-history edges + injection classification · orphaned adminCount (AdminSDHolder) · trust-account AuthN Policy check (Server 2025 one-way-trust weakness) |
 | v0.13   | ✅      | **Entry-condition posture** — domain password policy + Fine-Grained PSOs (spray-friendliness) · krbtgt password age (Golden Ticket exposure) · noPac / Certifried surfacing from MachineAccountQuota |
-| v0.14   | 🔲      | **ACL depth + lateral edges** — fine-grained dangerous ACEs (`ForceChangePassword` / `WriteSPN` / `AddKeyCredentialLink` / `AddSelf`) · GPO→lateral edges (`AdminTo` / `CanRDP` / `CanPSRemote` / `ExecuteDCOM`) · password-hygiene triad (`PASSWD_NOTREQD` / `DONT_EXPIRE_PASSWORD` / description passwords) |
-| v0.15   | 🔲      | **Stealth persistence + SYSVOL/ADCS depth** — hidden-object / OWNER RIGHTS (`S-1-3-4`) deny-ACE persistence · unattend.xml + SYSVOL secret sweep · ADCS persistence (template validity + NTAuth store) |
-| v0.16   | 🔲      | **Cross-domain + hybrid footprint** — foreign security principals in privileged groups · Entra Connect (`MSOL_` / `AAD_`) Tier-0 tagging · ADFS DKM key ACL (Golden SAML precondition) |
-| v0.17   | 🔲      | **Query hygiene + honest footprint** — minimal `SDflags` / security-mask · attribute-list & filter-indexability audit · "Detection footprint" documentation (how each scan appears in event 1644) |
+| v0.14   | ✅      | **ACL depth + lateral edges** — fine-grained dangerous ACEs (`ForceChangePassword` / `WriteSPN` / `AddKeyCredentialLink` / `AddSelf`) · GPO→lateral edges (`AdminTo` / `CanRDP` / `CanPSRemote` / `ExecuteDCOM`) · password-hygiene triad (`PASSWD_NOTREQD` / `DONT_EXPIRE_PASSWORD` / description passwords) |
+| v0.15   | ✅      | **ACL structure audit (ADeleg-class)** — owner ≠ admin · disabled inheritance · non-canonical DACL · orphaned trustees · low-priv → Tier-0 aggregation · schema `defaultSecurityDescriptor` backdoor |
+| v0.16   | 🔲      | **Stealth persistence + SYSVOL/ADCS depth** — hidden-object / OWNER RIGHTS (`S-1-3-4`) deny-ACE persistence · unattend.xml + SYSVOL secret sweep · ADCS persistence (template validity + NTAuth store) |
+| v0.17   | 🔲      | **Cross-domain + hybrid footprint** — foreign security principals in privileged groups · Entra Connect (`MSOL_` / `AAD_`) Tier-0 tagging · ADFS DKM key ACL (Golden SAML precondition) |
+| v0.18   | 🔲      | **Query hygiene + honest footprint** — minimal `SDflags` / security-mask · attribute-list & filter-indexability audit · "Detection footprint" documentation (how each scan appears in event 1644) |
 | v1.0    | 🔲      | Feature-complete for the on-prem, directory-side posture mission |
 | post-1.0 | 🔲     | ADExplorer `.dat` snapshot as an offline input source (optional; touches the data-source layer) |
 

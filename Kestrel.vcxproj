@@ -134,6 +134,7 @@
     <ClCompile Include="code\KestrelBaseline.c" />
     <ClCompile Include="code\KestrelDiff.c" />
     <ClCompile Include="code\KestrelGMSA.c" />
+    <ClCompile Include="code\KestrelGpoLateral.c" />
     <ClCompile Include="code\KestrelGPP.c" />
     <ClCompile Include="code\KestrelGroup.c" />
     <ClCompile Include="code\KestrelHygiene.c" />
@@ -143,6 +144,7 @@
     <ClCompile Include="code\KestrelPwdPolicy.c" />
     <ClCompile Include="code\KestrelReport.c" />
     <ClCompile Include="code\KestrelRoast.c" />
+    <ClCompile Include="code\KestrelSchemaAudit.c" />
     <ClCompile Include="code\KestrelShadowCreds.c" />
     <ClCompile Include="code\KestrelSidHistory.c" />
     <ClCompile Include="code\KestrelTrust.c" />

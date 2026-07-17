@@ -79,6 +79,8 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunAdminSDHolder; /* orphaned adminCount (AdminSDHolder)  */
     BOOL bRunPwdPolicy;   /* password policy + PSO + krbtgt + MAQ   */
     BOOL bRunHygiene;     /* credential hygiene (UAC flags + desc)  */
+    BOOL bRunGpoLateral;  /* GPO local-group → lateral edges        */
+    BOOL bRunSchemaAudit; /* schema defaultSecurityDescriptor audit */
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
@@ -117,6 +119,10 @@ typedef enum _KESTREL_ACL_EDGE_TYPE {
     EDGE_CREATE_CHILD   = 7,
     EDGE_DELETE_CHILD   = 8,
     EDGE_SELF           = 9,
+    EDGE_FORCE_CHANGE_PASSWORD = 10,
+    EDGE_WRITE_SPN      = 11,
+    EDGE_ADD_KEYCREDENTIAL = 12,
+    EDGE_ADD_SELF       = 13,
 } KESTREL_ACL_EDGE_TYPE;
 
 typedef struct _KESTREL_ACL_EDGE {
@@ -268,7 +274,15 @@ typedef enum _KESTREL_GRAPH_EDGE_TYPE {
     GEDGE_CAN_READ_GMSA_PASSWORD,  /* 12 — v0.7 */
     GEDGE_TRUSTS,                  /* 13 — domain → trusted domain */
     GEDGE_ADCS_ESC,                /* 14 — principal → domain (cert escalation) */
-    GEDGE_HAS_SID_HISTORY          /* 15 — principal → SID carried in sIDHistory */
+    GEDGE_HAS_SID_HISTORY,          /* 15 — principal → SID carried in sIDHistory */
+    GEDGE_FORCE_CHANGE_PASSWORD,   /* 16 — reset target's password */
+    GEDGE_WRITE_SPN,               /* 17 — set SPN → targeted Kerberoast */
+    GEDGE_ADD_KEYCREDENTIAL,       /* 18 — add key credential → shadow creds */
+    GEDGE_ADD_SELF,                /* 19 — add self to a group */
+    GEDGE_ADMIN_TO,                /* 20 — local admin on computer (via GPO) */
+    GEDGE_CAN_RDP,                 /* 21 — RDP to computer (via GPO) */
+    GEDGE_CAN_PSREMOTE,            /* 22 — WinRM / PSRemote to computer (via GPO) */
+    GEDGE_EXECUTE_DCOM             /* 23 — DCOM on computer (via GPO) */
 } KESTREL_GRAPH_EDGE_TYPE;
 
 typedef struct _KESTREL_GRAPH_NODE {
@@ -312,6 +326,7 @@ typedef struct _KESTREL_GRAPH {
     DWORD                     cTrustEdges;
     DWORD                     cAdcsEdges;
     DWORD                     cSidHistEdges;
+    DWORD                     cGpoLatEdges;
 } KESTREL_GRAPH;
 
 typedef enum _KESTREL_REPORT_FORMAT {
@@ -420,6 +435,22 @@ typedef struct _KESTREL_SIDHISTORY_SCAN_RESULT {
     DWORD                    cObjects;
     DWORD                    cPrivileged;
 } KESTREL_SIDHISTORY_SCAN_RESULT;
+
+/* One GPO-delivered lateral grant: principal → computer, of a mapped kind. */
+typedef struct _KESTREL_GPOLAT_FINDING {
+    WCHAR                   wszPrincipalSid[96];
+    WCHAR                   wszComputerSid[96];
+    WCHAR                   wszComputerName[128];
+    KESTREL_GRAPH_EDGE_TYPE EdgeType;
+} KESTREL_GPOLAT_FINDING;
+
+typedef struct _KESTREL_GPOLATERAL_SCAN_RESULT {
+    KESTREL_GPOLAT_FINDING *rgFindings;
+    DWORD                   cFindings;
+    DWORD                   cCapacity;
+    DWORD                   cGpos;
+    DWORD                   cComputers;
+} KESTREL_GPOLATERAL_SCAN_RESULT;
 
 /* ════════════════════════════════════════════════════════════════════════════
  * Shared types — KestrelGMSA.c (v0.7)
@@ -741,6 +772,33 @@ HRESULT KestrelRunPwdPolicyScan(
  * Prints; returns S_OK. */
 _Must_inspect_result_
 HRESULT KestrelRunHygieneScan(
+    _In_z_ LPCWSTR pwszDomainNC);
+
+/* Enumerate GPOs, parse [Group Membership], resolve links to computers, and
+ * return principal→computer lateral grants for the graph. */
+_Must_inspect_result_
+HRESULT KestrelRunGpoLateralScan(
+    _In_z_   LPCWSTR                         pwszDomainNC,
+    _Outptr_ KESTREL_GPOLATERAL_SCAN_RESULT **ppResult);
+
+VOID KestrelFreeGpoLateralScanResult(
+    _In_opt_ KESTREL_GPOLATERAL_SCAN_RESULT *pResult);
+
+/* Add AdminTo / CanRDP / CanPSRemote / ExecuteDCOM edges to a built graph. */
+_Must_inspect_result_
+HRESULT KestrelGraphAddGpoLateralEdges(
+    _Inout_ KESTREL_GRAPH                   *pGraph,
+    _In_    KESTREL_GPOLATERAL_SCAN_RESULT  *pResult);
+
+/* Report edges from a low-privilege trustee to a Tier-0 resource (ADeleg-class).
+ * Runs over the built + high-value-tagged graph. */
+VOID KestrelGraphReportLowToHigh(
+    _In_ KESTREL_GRAPH *pGraph);
+
+/* Audit each classSchema's defaultSecurityDescriptor for a dangerous grant to a
+ * low-privilege principal (schema-level backdoor persistence). Prints; S_OK. */
+_Must_inspect_result_
+HRESULT KestrelRunSchemaAuditScan(
     _In_z_ LPCWSTR pwszDomainNC);
 
 /* ════════════════════════════════════════════════════════════════════════════

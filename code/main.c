@@ -72,6 +72,8 @@ KestrelPrintHelp(VOID)
         L"  --adminsdholder  Orphaned adminCount=1 objects (AdminSDHolder)\n"
         L"  --pwdpolicy    Password policy + PSO · krbtgt age · MachineAccountQuota\n"
         L"  --hygiene      Credential hygiene (PASSWD_NOTREQD / DONT_EXPIRE / reversible / desc)\n"
+        L"  --gpolateral   GPO local-group → lateral edges (AdminTo/CanRDP/CanPSRemote/ExecuteDCOM)\n"
+        L"  --schema       Schema defaultSecurityDescriptor audit (schema-level backdoor)\n"
         L"  --trust        Domain/forest trust posture audit\n"
         L"  --gmsa         gMSA password reader enumeration\n"
         L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
@@ -116,6 +118,8 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunAdminSDHolder = TRUE;
     pCfg->bRunPwdPolicy   = TRUE;
     pCfg->bRunHygiene     = TRUE;
+    pCfg->bRunGpoLateral  = TRUE;
+    pCfg->bRunSchemaAudit = TRUE;
     pCfg->bRunTrust      = TRUE;
     pCfg->bRunGMSA       = TRUE;
     pCfg->bRunADCS       = TRUE;
@@ -285,6 +289,16 @@ KestrelParseArgs(
             pCfg->bExplicitModules = TRUE;
             continue;
         }
+        if (_wcsicmp(arg, L"--gpolateral") == 0) {
+            pCfg->bRunGpoLateral = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--schema") == 0) {
+            pCfg->bRunSchemaAudit = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
         if (_wcsicmp(arg, L"--trust") == 0) {
             pCfg->bRunTrust = TRUE;
             pCfg->bExplicitModules = TRUE;
@@ -355,6 +369,7 @@ int wmain(int argc, wchar_t *argv[])
     KESTREL_ROAST_SCAN_RESULT     *pRoast  = 0;
     KESTREL_TRUST_SCAN_RESULT     *pTrust  = 0;
     KESTREL_SIDHISTORY_SCAN_RESULT *pSidHist = 0;
+    KESTREL_GPOLATERAL_SCAN_RESULT *pGpoLat = 0;
     KESTREL_GMSA_SCAN_RESULT      *pGMSA   = 0;
     KESTREL_ADCS_SCAN_RESULT      *pADCS   = 0;
     KESTREL_GPP_SCAN_RESULT       * pGPP   = 0;
@@ -486,6 +501,14 @@ int wmain(int argc, wchar_t *argv[])
             wprintf(L"[!] KestrelRunSidHistoryScan failed: 0x%08X\n", hr);
     }
 
+    /* ── GPO local-group membership → lateral edges ───────────────── */
+    if (cfg.bRunGpoLateral) {
+        wprintf(L"\n═══ Kestrel — GPO Lateral-Movement Edges ═══\n\n");
+        hr = KestrelRunGpoLateralScan(wszDomainNC, &pGpoLat);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunGpoLateralScan failed: 0x%08X\n", hr);
+    }
+
     /* ── orphaned adminCount (AdminSDHolder) ──────────────────────── */
     if (cfg.bRunAdminSDHolder) {
         wprintf(L"\n═══ Kestrel — AdminSDHolder Orphan Scan ═══\n\n");
@@ -508,6 +531,14 @@ int wmain(int argc, wchar_t *argv[])
         hr = KestrelRunHygieneScan(wszDomainNC);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunHygieneScan failed: 0x%08X\n", hr);
+    }
+
+    /* ── schema defaultSecurityDescriptor audit ───────────────────── */
+    if (cfg.bRunSchemaAudit) {
+        wprintf(L"\n═══ Kestrel — Schema Default-SD Audit ═══\n\n");
+        hr = KestrelRunSchemaAuditScan(wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunSchemaAuditScan failed: 0x%08X\n", hr);
     }
 
     /* ── v0.7: domain trust posture audit ────────────────────────── */
@@ -558,7 +589,7 @@ int wmain(int argc, wchar_t *argv[])
     /* ── v0.4: build graph + report (HTML / JSON / YAML by extension) ── */
     if (cfg.bRunACL || cfg.bRunGroups || cfg.bRunDelegation ||
         cfg.bRunLAPS || cfg.bRunPaths || cfg.bRunGMSA || cfg.bRunRoast ||
-        cfg.bRunTrust || cfg.bRunADCS || cfg.bRunSidHistory) {
+        cfg.bRunTrust || cfg.bRunADCS || cfg.bRunSidHistory || cfg.bRunGpoLateral) {
         hr = KestrelBuildGraph(pACL, pGroup, pDeleg, pLaps, pGMSA, pRoast,
                                pTrust, pADCS, wszDomainNC, &pGraph);
         if (FAILED(hr)) {
@@ -574,6 +605,16 @@ int wmain(int argc, wchar_t *argv[])
                 if (FAILED(hr))
                     wprintf(L"[!] KestrelGraphAddSidHistoryEdges failed: 0x%08X\n", hr);
             }
+
+            /* fold GPO local-group grants in as AdminTo/CanRDP/… edges */
+            if (pGpoLat) {
+                hr = KestrelGraphAddGpoLateralEdges(pGraph, pGpoLat);
+                if (FAILED(hr))
+                    wprintf(L"[!] KestrelGraphAddGpoLateralEdges failed: 0x%08X\n", hr);
+            }
+
+            /* ADeleg-class: low-privilege trustee → Tier-0 resource */
+            KestrelGraphReportLowToHigh(pGraph);
 
             /* v0.5: attack-path analysis */
             if (cfg.bRunPaths) {
@@ -616,6 +657,7 @@ Cleanup:
     KestrelFreePathResult(pPaths);
     KestrelFreeRoastScanResult(pRoast);
     KestrelFreeSidHistoryScanResult(pSidHist);
+    KestrelFreeGpoLateralScanResult(pGpoLat);
     KestrelFreeTrustScanResult(pTrust);
     KestrelFreeGMSAScanResult(pGMSA);
     KestrelFreeADCSScanResult(pADCS);

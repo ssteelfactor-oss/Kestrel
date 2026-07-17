@@ -75,6 +75,12 @@
     <ClCompile Include="code\KestrelHygiene.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="code\KestrelSchemaAudit.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
+    <ClCompile Include="code\KestrelGpoLateral.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="include\Kestrel.h">

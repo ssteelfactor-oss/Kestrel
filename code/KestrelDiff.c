@@ -29,7 +29,8 @@ static const char *g_rgszDiffEdgeType[] = {
     "MemberOf",
     "Delegation_Unconstrained", "Delegation_Constrained", "Delegation_S4U2Self",
     "Delegation_RBCD", "CanReadLAPS", "CanReadGMSAPassword",
-    "Trusts", "ADCS_ESC", "HasSIDHistory"
+    "Trusts", "ADCS_ESC", "HasSIDHistory",
+    "ForceChangePassword", "WriteSPN", "AddKeyCredentialLink", "AddSelf"
 };
 
 typedef struct { char *sid; char *label; } DIFF_NODE;

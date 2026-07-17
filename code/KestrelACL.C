@@ -56,8 +56,119 @@ static LPWSTR g_rgszRightAttrs[] = {
 #define GUID_FORCE_CHANGE_PASSWORD      L"{00299570-246d-11d0-a768-00aa006e0529}"
 /* Self-Membership (write to member attr on groups)                         */
 #define GUID_SELF_MEMBERSHIP            L"{bf9679c0-0de6-11d0-a285-00aa003049e2}"
+/* servicePrincipalName attribute (write → targeted Kerberoast)             */
+#define GUID_WRITE_SPN                  L"{f3a64788-5306-11d1-a9c5-0000f80367c1}"
+/* msDS-KeyCredentialLink attribute (write → shadow credentials)            */
+#define GUID_KEY_CREDENTIAL_LINK        L"{5b47d60f-6090-40b2-9f37-2a4de88f3063}"
 /* ms-DS-Allowed-To-Act-On-Behalf-Of-Other-Identity (RBCD write)           */
 #define GUID_ALLOWED_TO_ACT_ON_BEHALF  L"{3f78c3e5-f79a-46bd-a0b8-9d18116ddc79}"
+
+/* An "admin" owner we do NOT flag: SYSTEM, BUILTIN\Administrators, or a
+ * well-known privileged domain RID. Anything else owning an object is a hidden
+ * GenericAll — the owner can rewrite the DACL at will regardless of the DACL. */
+static BOOL
+_IsAdminOwner(_In_ PSID pSid)
+{
+    LPWSTR  s = NULL;
+    BOOL    bAdmin = FALSE;
+    LPCWSTR rid;
+
+    if (!pSid || !IsValidSid(pSid)) return TRUE;      /* unknown → don't flag */
+    if (!ConvertSidToStringSidW(pSid, &s) || !s) return TRUE;
+
+    if (_wcsicmp(s, L"S-1-5-18") == 0 ||              /* SYSTEM */
+        _wcsicmp(s, L"S-1-5-32-544") == 0) {          /* BUILTIN\Administrators */
+        bAdmin = TRUE;
+    } else {
+        rid = wcsrchr(s, L'-');
+        if (rid) {
+            rid++;
+            if (!wcscmp(rid, L"500") || !wcscmp(rid, L"512") || !wcscmp(rid, L"518") ||
+                !wcscmp(rid, L"519") || !wcscmp(rid, L"520"))
+                bAdmin = TRUE;
+        }
+    }
+    LocalFree(s);
+    return bAdmin;
+}
+
+/* Trustee SID pointer for the four common ACE types (allow/deny, ±object). */
+static PSID
+_HygieneAceSid(_In_ ACE_HEADER *pAce)
+{
+    switch (pAce->AceType) {
+    case ACCESS_ALLOWED_ACE_TYPE:
+        return (PSID)&((ACCESS_ALLOWED_ACE *)pAce)->SidStart;
+    case ACCESS_DENIED_ACE_TYPE:
+        return (PSID)&((ACCESS_DENIED_ACE *)pAce)->SidStart;
+    case ACCESS_ALLOWED_OBJECT_ACE_TYPE: {
+        ACCESS_ALLOWED_OBJECT_ACE *p = (ACCESS_ALLOWED_OBJECT_ACE *)pAce;
+        return (PSID)((BYTE *)p + sizeof(ACCESS_ALLOWED_OBJECT_ACE) -
+            (2 - !!(p->Flags & ACE_OBJECT_TYPE_PRESENT)
+               - !!(p->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT)) * sizeof(GUID));
+    }
+    case ACCESS_DENIED_OBJECT_ACE_TYPE: {
+        ACCESS_DENIED_OBJECT_ACE *p = (ACCESS_DENIED_OBJECT_ACE *)pAce;
+        return (PSID)((BYTE *)p + sizeof(ACCESS_DENIED_OBJECT_ACE) -
+            (2 - !!(p->Flags & ACE_OBJECT_TYPE_PRESENT)
+               - !!(p->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT)) * sizeof(GUID));
+    }
+    default:
+        return NULL;
+    }
+}
+
+/* ADeleg-class DACL-structure checks over one object's DACL:
+ *   non-canonical order — canonical is explicit-deny, explicit-allow,
+ *     inherited-deny, inherited-allow (rank 0..3); a drop in rank means the
+ *     DACL was hand-edited and access no longer evaluates as expected.
+ *   orphaned trustee    — an explicit ACE for a domain SID (RID >= 1000) that
+ *     no longer resolves: residue of a deleted account, and a SID that could be
+ *     re-created / re-used. */
+static VOID
+_CheckDaclHygiene(_In_ PACL pDacl, _In_z_ LPCWSTR pwszDN)
+{
+    WORD i;
+    int  maxRank   = -1;
+    BOOL bReported = FALSE;
+
+    if (!pDacl) return;
+
+    for (i = 0; i < pDacl->AceCount; i++) {
+        ACE_HEADER *pAce = NULL;
+        BOOL bAllow, bInherited;
+        int  rank;
+
+        if (!GetAce(pDacl, i, (LPVOID *)&pAce) || !pAce) continue;
+
+        bAllow = (pAce->AceType == ACCESS_ALLOWED_ACE_TYPE ||
+                  pAce->AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE);
+        bInherited = (pAce->AceFlags & INHERITED_ACE) != 0;
+        rank = (bInherited ? 2 : 0) + (bAllow ? 1 : 0);
+        if (rank < maxRank && !bReported) {
+            wprintf(L"  [NON-CANONICAL] %s — DACL ACEs out of canonical order (tampering marker)\n", pwszDN);
+            bReported = TRUE;
+        }
+        if (rank > maxRank) maxRank = rank;
+
+        if (!bInherited) {
+            PSID pSid = _HygieneAceSid(pAce);
+            LPWSTR s = NULL;
+            if (pSid && IsValidSid(pSid) && ConvertSidToStringSidW(pSid, &s) && s) {
+                LPCWSTR rid = wcsrchr(s, L'-');
+                if (_wcsnicmp(s, L"S-1-5-21-", 9) == 0 && rid && wcslen(rid + 1) >= 4) {
+                    WCHAR       name[256], dom[256];
+                    DWORD       cn = ARRAYSIZE(name), cd = ARRAYSIZE(dom);
+                    SID_NAME_USE use;
+                    if (!LookupAccountSidW(NULL, pSid, name, &cn, dom, &cd, &use) &&
+                        GetLastError() == ERROR_NONE_MAPPED)
+                        wprintf(L"  [ORPHAN-SID] %s — ACE for unresolvable trustee %s\n", pwszDN, s);
+                }
+            }
+            if (s) LocalFree(s);
+        }
+    }
+}
 
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -893,12 +1004,35 @@ KestrelScanACLEdges(
             BOOL bPresent = FALSE;
             BOOL bDefault = FALSE;
 
+            /* ADeleg-class structural checks: disabled inheritance + non-admin owner */
+            {
+                SECURITY_DESCRIPTOR_CONTROL sdCtrl = 0;
+                DWORD dwSdRev = 0;
+                PSID  pOwner  = NULL;
+                BOOL  bOwnerDef = FALSE;
+
+                if (GetSecurityDescriptorControl(pSD, &sdCtrl, &dwSdRev) &&
+                    (sdCtrl & SE_DACL_PROTECTED))
+                    wprintf(L"  [NO-INHERIT] %s — DACL inheritance disabled\n", wszDN);
+
+                if (GetSecurityDescriptorOwner(pSD, &pOwner, &bOwnerDef) &&
+                    pOwner && !_IsAdminOwner(pOwner)) {
+                    LPWSTR so = NULL;
+                    if (ConvertSidToStringSidW(pOwner, &so) && so) {
+                        wprintf(L"  [OWNER] %s — owned by non-admin %s\n", wszDN, so);
+                        LocalFree(so);
+                    }
+                }
+            }
+
             if (GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDefault) &&
                 bPresent && pDacl) {
                 HRESULT hrW = KestrelWalkDacl(pDacl, wszDN, wszClass,
                     pRights, pBaseline, bAdminCount, pResult);
                 if (FAILED(hrW))
                     pResult->cObjectsErrored++;
+
+                _CheckDaclHygiene(pDacl, wszDN);
             }
             pResult->cObjectsScanned++;
         }
@@ -991,16 +1125,39 @@ KestrelClassifyAccessMask(
     _In_     DWORD  dwAccessMask,
     _In_opt_ GUID* pObjectTypeGuid)
 {
-    /* Order matters: check broadest rights first */
-    if (dwAccessMask & GENERIC_ALL)                  return EDGE_GENERIC_ALL;
-    if (dwAccessMask & WRITE_DAC)                    return EDGE_WRITE_DACL;
-    if (dwAccessMask & WRITE_OWNER)                  return EDGE_WRITE_OWNER;
-    if (dwAccessMask & GENERIC_WRITE)                return EDGE_GENERIC_WRITE;
-    if (dwAccessMask & ADS_RIGHT_DS_CONTROL_ACCESS)  return EDGE_EXTENDED_RIGHT;
-    if (dwAccessMask & ADS_RIGHT_DS_WRITE_PROP)      return EDGE_WRITE_PROPERTY;
+    WCHAR wszGuid[64] = L"";
+
+    if (pObjectTypeGuid)
+        KestrelGuidToString(pObjectTypeGuid, wszGuid, ARRAYSIZE(wszGuid));
+
+    /* Order matters: check broadest rights first (GUID-independent) */
+    if (dwAccessMask & GENERIC_ALL)   return EDGE_GENERIC_ALL;
+    if (dwAccessMask & WRITE_DAC)     return EDGE_WRITE_DACL;
+    if (dwAccessMask & WRITE_OWNER)   return EDGE_WRITE_OWNER;
+    if (dwAccessMask & GENERIC_WRITE) return EDGE_GENERIC_WRITE;
+
+    /* Object-specific control access — classify by extended-right GUID */
+    if (dwAccessMask & ADS_RIGHT_DS_CONTROL_ACCESS) {
+        if (wszGuid[0] && _wcsicmp(wszGuid, GUID_FORCE_CHANGE_PASSWORD) == 0)
+            return EDGE_FORCE_CHANGE_PASSWORD;
+        return EDGE_EXTENDED_RIGHT;
+    }
+    /* Object-specific property write — classify by attribute GUID */
+    if (dwAccessMask & ADS_RIGHT_DS_WRITE_PROP) {
+        if (wszGuid[0]) {
+            if (_wcsicmp(wszGuid, GUID_WRITE_SPN) == 0)           return EDGE_WRITE_SPN;
+            if (_wcsicmp(wszGuid, GUID_KEY_CREDENTIAL_LINK) == 0) return EDGE_ADD_KEYCREDENTIAL;
+            if (_wcsicmp(wszGuid, GUID_SELF_MEMBERSHIP) == 0)     return EDGE_ADD_SELF;
+        }
+        return EDGE_WRITE_PROPERTY;
+    }
     if (dwAccessMask & ADS_RIGHT_DS_CREATE_CHILD)    return EDGE_CREATE_CHILD;
     if (dwAccessMask & ADS_RIGHT_DS_DELETE_CHILD)    return EDGE_DELETE_CHILD;
-    if (dwAccessMask & ADS_RIGHT_DS_SELF)            return EDGE_SELF;
+    if (dwAccessMask & ADS_RIGHT_DS_SELF) {
+        if (wszGuid[0] && _wcsicmp(wszGuid, GUID_SELF_MEMBERSHIP) == 0)
+            return EDGE_ADD_SELF;
+        return EDGE_SELF;
+    }
     return EDGE_UNKNOWN;
 }
 

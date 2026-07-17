@@ -252,6 +252,46 @@ KestrelGraphAddSidHistoryEdges(
     return S_OK;
 }
 
+/*
+ * GPO-delivered lateral edges: principal → computer (AdminTo / CanRDP /
+ * CanPSRemote / ExecuteDCOM). Post-pass, called from main after the graph is
+ * built, so computer/principal nodes dedup against the ACL/membership scans.
+ */
+_Must_inspect_result_
+HRESULT
+KestrelGraphAddGpoLateralEdges(
+    _Inout_ KESTREL_GRAPH                  *pGraph,
+    _In_    KESTREL_GPOLATERAL_SCAN_RESULT *pResult)
+{
+    DWORD i;
+
+    if (!pGraph || !pResult) return E_INVALIDARG;
+
+    for (i = 0; i < pResult->cFindings; i++) {
+        const KESTREL_GPOLAT_FINDING *pF = &pResult->rgFindings[i];
+        DWORD   iFrom, iTo;
+        HRESULT hr;
+
+        if (!pF->wszPrincipalSid[0] || !pF->wszComputerSid[0])
+            continue;
+
+        iFrom = KestrelGraphGetOrAddNode(pGraph, pF->wszPrincipalSid, L"",
+            pF->wszPrincipalSid, NODE_CLASS_UNKNOWN, TRUE, TRUE);
+        iTo = KestrelGraphGetOrAddNode(pGraph, pF->wszComputerSid, L"",
+            pF->wszComputerName[0] ? pF->wszComputerName : pF->wszComputerSid,
+            NODE_CLASS_COMPUTER, TRUE, TRUE);
+        if (iFrom == MAXDWORD || iTo == MAXDWORD)
+            continue;
+
+        hr = KestrelGraphAddEdge(pGraph, iFrom, iTo, pF->EdgeType,
+                L"GPO local-group membership", FALSE);
+        if (FAILED(hr)) return hr;
+        pGraph->cGpoLatEdges++;
+    }
+
+    return S_OK;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────── */
 /*  Public API                                                                 */
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -483,6 +523,14 @@ KestrelEmitHtml(
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#2ECC71\"></div>Trusts</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#E74C3C\"></div>ADCS_ESC</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#9B59B6\"></div>HasSIDHistory</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#C0392B\"></div>ForceChangePassword</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#D35400\"></div>WriteSPN</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#8E44AD\"></div>AddKeyCredentialLink</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#16A085\"></div>AddSelf</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#E67E22\"></div>AdminTo</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#3498DB\"></div>CanRDP</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#1ABC9C\"></div>CanPSRemote</div>\n", pFile);
+    fputs("  <div class=\"item\"><div class=\"line\" style=\"background:#F39C12\"></div>ExecuteDCOM</div>\n", pFile);
     fputs("  <div class=\"item\"><div class=\"dot\" style=\"background:#fff;border:2px solid #E74C3C\"></div>Roastable</div>\n", pFile);
     fputs("</div>\n", pFile);
 
@@ -523,7 +571,15 @@ KestrelEmitHtml(
     fputs("  CanReadGMSAPassword: '#E67E22',\n", pFile);
     fputs("  Trusts: '#2ECC71',\n", pFile);
     fputs("  ADCS_ESC: '#E74C3C',\n", pFile);
-    fputs("  HasSIDHistory: '#9B59B6'\n", pFile);
+    fputs("  HasSIDHistory: '#9B59B6',\n", pFile);
+    fputs("  ForceChangePassword: '#C0392B',\n", pFile);
+    fputs("  WriteSPN: '#D35400',\n", pFile);
+    fputs("  AddKeyCredentialLink: '#8E44AD',\n", pFile);
+    fputs("  AddSelf: '#16A085'\n", pFile);
+    fputs("  ,AdminTo: '#E67E22'\n", pFile);
+    fputs("  ,CanRDP: '#3498DB'\n", pFile);
+    fputs("  ,CanPSRemote: '#1ABC9C'\n", pFile);
+    fputs("  ,ExecuteDCOM: '#F39C12'\n", pFile);
     fputs("};\n\n", pFile);
     fputs("const EDGE_SEVERITY = {\n", pFile);
     fputs("  GenericAll: 3, WriteDACL: 3, WriteOwner: 3,\n", pFile);
@@ -800,6 +856,10 @@ KestrelGraphAddACLEdges(
         GEDGE_ACL_GENERIC_WRITE,  /* EDGE_CREATE_CHILD               */
         GEDGE_ACL_GENERIC_WRITE,  /* EDGE_DELETE_CHILD               */
         GEDGE_ACL_GENERIC_WRITE,  /* EDGE_SELF                       */
+        GEDGE_FORCE_CHANGE_PASSWORD, /* EDGE_FORCE_CHANGE_PASSWORD   */
+        GEDGE_WRITE_SPN,          /* EDGE_WRITE_SPN                  */
+        GEDGE_ADD_KEYCREDENTIAL,  /* EDGE_ADD_KEYCREDENTIAL          */
+        GEDGE_ADD_SELF,           /* EDGE_ADD_SELF                   */
     };
 
     for (DWORD i = 0; i < pACLResult->cEdges; i++) {
@@ -1334,8 +1394,57 @@ static const char *g_rgszEdgeType[] = {
     "MemberOf",
     "Delegation_Unconstrained", "Delegation_Constrained", "Delegation_S4U2Self",
     "Delegation_RBCD", "CanReadLAPS", "CanReadGMSAPassword",
-    "Trusts", "ADCS_ESC", "HasSIDHistory"
+    "Trusts", "ADCS_ESC", "HasSIDHistory",
+    "ForceChangePassword", "WriteSPN", "AddKeyCredentialLink", "AddSelf",
+    "AdminTo", "CanRDP", "CanPSRemote", "ExecuteDCOM"
 };
+
+/* Low-privilege trustee → Tier-0 resource (ADeleg's flagship view): any edge
+ * whose source is Everyone / Authenticated Users / Domain Users / Users and
+ * whose target is a tagged high-value node. Runs over the built+tagged graph.
+ * Placed after g_rgszEdgeType so the edge-name lookup is in scope. */
+static BOOL
+_IsLowPrivSid(_In_opt_z_ LPCWSTR sid)
+{
+    LPCWSTR r;
+    if (!sid || !sid[0]) return FALSE;
+    if (_wcsicmp(sid, L"S-1-1-0")     == 0) return TRUE;  /* Everyone */
+    if (_wcsicmp(sid, L"S-1-5-11")    == 0) return TRUE;  /* Authenticated Users */
+    if (_wcsicmp(sid, L"S-1-5-32-545")== 0) return TRUE;  /* BUILTIN\Users */
+    r = wcsrchr(sid, L'-');
+    if (r && _wcsicmp(r + 1, L"513") == 0) return TRUE;   /* Domain Users */
+    return FALSE;
+}
+
+VOID
+KestrelGraphReportLowToHigh(_In_ KESTREL_GRAPH *pGraph)
+{
+    DWORD i, c = 0;
+
+    if (!pGraph) return;
+
+    for (i = 0; i < pGraph->cEdges; i++) {
+        KESTREL_GRAPH_EDGE *e = &pGraph->pEdges[i];
+        KESTREL_GRAPH_NODE *f, *t;
+
+        if (e->bDeny) continue;
+        if (e->iFrom >= pGraph->cNodes || e->iTo >= pGraph->cNodes) continue;
+        f = &pGraph->pNodes[e->iFrom];
+        t = &pGraph->pNodes[e->iTo];
+        if (!t->bHighValue || !_IsLowPrivSid(f->wszSid)) continue;
+
+        if (c == 0)
+            wprintf(L"\n[*] Low-privilege trustee -> Tier-0 resource (ADeleg-class)\n");
+        wprintf(L"  [LOW->HIGH] %s  --%S-->  %s\n",
+            f->wszLabel[0] ? f->wszLabel : f->wszSid,
+            (e->Type < (KESTREL_GRAPH_EDGE_TYPE)ARRAYSIZE(g_rgszEdgeType))
+                ? g_rgszEdgeType[e->Type] : "?",
+            t->wszLabel[0] ? t->wszLabel : t->wszSid);
+        c++;
+    }
+    if (c)
+        wprintf(L"  [=] %lu low-priv -> Tier-0 grant(s) — review urgently\n", c);
+}
 
 _Must_inspect_result_
 static HRESULT
@@ -1531,6 +1640,14 @@ static const char *g_rgszBhEdgeKind[] = {
     "Trusts",                  /* GEDGE_TRUSTS                  */
     "ADCSESC",                 /* GEDGE_ADCS_ESC                */
     "HasSIDHistory"            /* GEDGE_HAS_SID_HISTORY         */
+    ,"ForceChangePassword"     /* GEDGE_FORCE_CHANGE_PASSWORD   */
+    ,"WriteSPN"                /* GEDGE_WRITE_SPN               */
+    ,"AddKeyCredentialLink"    /* GEDGE_ADD_KEYCREDENTIAL       */
+    ,"AddSelf"                 /* GEDGE_ADD_SELF                */
+    ,"AdminTo"                 /* GEDGE_ADMIN_TO               */
+    ,"CanRDP"                  /* GEDGE_CAN_RDP               */
+    ,"CanPSRemote"             /* GEDGE_CAN_PSREMOTE          */
+    ,"ExecuteDCOM"             /* GEDGE_EXECUTE_DCOM          */
 };
 
 /* Emit a node id: objectSid when present, else a stable synthetic key so every
