@@ -348,6 +348,14 @@ KestrelBuildGraph(
                         pGraph->cEdgesCapacity * sizeof(KESTREL_GRAPH_EDGE));
     if (!pGraph->pEdges) { hr = E_OUTOFMEMORY; goto Cleanup; }
 
+    /* Node-dedup hash table — dynamic, grows + rehashes (no fixed 4096 cap) */
+    pGraph->dwHashSize = KESTREL_GRAPH_HASH_SIZE;
+    pGraph->dwHashMask = KESTREL_GRAPH_HASH_SIZE - 1;
+    pGraph->pHash = (KESTREL_GRAPH_HASH_ENTRY *)HeapAlloc(GetProcessHeap(),
+                        HEAP_ZERO_MEMORY,
+                        (SIZE_T)pGraph->dwHashSize * sizeof(KESTREL_GRAPH_HASH_ENTRY));
+    if (!pGraph->pHash) { hr = E_OUTOFMEMORY; goto Cleanup; }
+
     wprintf(L"\n[*] Building graph...\n");
 
     /* Phase 1: ACL edges → nodes + edges */
@@ -408,6 +416,10 @@ KestrelBuildGraph(
 
     wprintf(L"  [*] Total nodes:      %lu\n", pGraph->cNodes);
     wprintf(L"  [*] Total edges:      %lu\n", pGraph->cEdges);
+
+    if (pGraph->bTruncated)
+        wprintf(L"  [!] WARNING: node hash table could not grow (out of memory) — "
+                L"graph is INCOMPLETE; some nodes and their edges were dropped\n");
 
     *ppGraph = pGraph;
     pGraph   = NULL;
@@ -726,7 +738,44 @@ KestrelGraphHash(
     DWORD hash = 5381;
     while (*pwszSid)
         hash = ((hash << 5) + hash) ^ (DWORD)*pwszSid++;
-    return hash & KESTREL_GRAPH_HASH_MASK;
+    return hash;
+}
+
+/* Double the node-dedup hash table and re-insert every occupied slot. Node
+ * indices are preserved (only the SID→slot mapping changes), so every index
+ * already stored in pNodes / pEdges stays valid. Returns FALSE only on an
+ * allocation failure. This is the fix for the fixed-4096 truncation bug: the
+ * table now grows with the node array instead of silently dropping nodes. */
+static BOOL
+KestrelGraphGrowHash(
+    _Inout_ KESTREL_GRAPH *pGraph)
+{
+    DWORD dwNewSize = pGraph->dwHashSize ? pGraph->dwHashSize * 2
+                                         : KESTREL_GRAPH_HASH_SIZE;
+    DWORD dwNewMask = dwNewSize - 1;
+    KESTREL_GRAPH_HASH_ENTRY *pNew;
+    DWORD i, j;
+
+    pNew = (KESTREL_GRAPH_HASH_ENTRY *)HeapAlloc(GetProcessHeap(),
+                HEAP_ZERO_MEMORY,
+                (SIZE_T)dwNewSize * sizeof(KESTREL_GRAPH_HASH_ENTRY));
+    if (!pNew) return FALSE;
+
+    for (i = 0; i < pGraph->dwHashSize; i++) {
+        DWORD slot;
+        if (pGraph->pHash[i].wszSid[0] == L'\0') continue;
+        slot = KestrelGraphHash(pGraph->pHash[i].wszSid) & dwNewMask;
+        for (j = 0; j < dwNewSize; j++) {
+            DWORD s = (slot + j) & dwNewMask;
+            if (pNew[s].wszSid[0] == L'\0') { pNew[s] = pGraph->pHash[i]; break; }
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, pGraph->pHash);
+    pGraph->pHash      = pNew;
+    pGraph->dwHashSize = dwNewSize;
+    pGraph->dwHashMask = dwNewMask;
+    return TRUE;
 }
 
 static DWORD
@@ -741,13 +790,18 @@ KestrelGraphGetOrAddNode(
 {
     if (!pwszSid || !pwszSid[0]) return MAXDWORD;
 
-    DWORD slot = KestrelGraphHash(pwszSid);
+    /* Grow + rehash before the table passes 50% load, so probing stays cheap
+     * and a node is never dropped once the array hits 4096. */
+    if (bCreate && (pGraph->cNodes + 1) * 2 > pGraph->dwHashSize)
+        (void)KestrelGraphGrowHash(pGraph);   /* if this fails we may truncate below */
+
+    DWORD slot = KestrelGraphHash(pwszSid) & pGraph->dwHashMask;
 
     /* Linear probing */
-    for (DWORD i = 0; i < KESTREL_GRAPH_HASH_SIZE; i++) {
-        DWORD s = (slot + i) & KESTREL_GRAPH_HASH_MASK;
+    for (DWORD i = 0; i < pGraph->dwHashSize; i++) {
+        DWORD s = (slot + i) & pGraph->dwHashMask;
 
-        if (pGraph->rgHash[s].wszSid[0] == L'\0') {
+        if (pGraph->pHash[s].wszSid[0] == L'\0') {
             /* Free slot — insert if requested */
             if (!bCreate) return MAXDWORD;
 
@@ -772,19 +826,22 @@ KestrelGraphGetOrAddNode(
             pNode->Class    = Class;
             pNode->bEnabled = bEnabled;
 
-            StringCchCopyW(pGraph->rgHash[s].wszSid,
-                           ARRAYSIZE(pGraph->rgHash[s].wszSid), pwszSid);
-            pGraph->rgHash[s].iNode = iNode;
+            StringCchCopyW(pGraph->pHash[s].wszSid,
+                           ARRAYSIZE(pGraph->pHash[s].wszSid), pwszSid);
+            pGraph->pHash[s].iNode = iNode;
 
             return iNode;
 
-        } else if (_wcsicmp(pGraph->rgHash[s].wszSid, pwszSid) == 0) {
+        } else if (_wcsicmp(pGraph->pHash[s].wszSid, pwszSid) == 0) {
             /* Found existing node */
-            return pGraph->rgHash[s].iNode;
+            return pGraph->pHash[s].iNode;
         }
     }
 
-    return MAXDWORD; /* hash table full — shouldn't happen */
+    /* Only reachable if a grow failed (OOM) and the table is genuinely full.
+     * Never lose a node silently — flag it so the summary and reports say so. */
+    pGraph->bTruncated = TRUE;
+    return MAXDWORD;
 }
 
 _Must_inspect_result_
@@ -1317,6 +1374,7 @@ KestrelFreeGraph(
     if (!pGraph) return;
     if (pGraph->pNodes) HeapFree(GetProcessHeap(), 0, pGraph->pNodes);
     if (pGraph->pEdges) HeapFree(GetProcessHeap(), 0, pGraph->pEdges);
+    if (pGraph->pHash)  HeapFree(GetProcessHeap(), 0, pGraph->pHash);
     HeapFree(GetProcessHeap(), 0, pGraph);
 }
 /* ─────────────────────────────────────────────────────────────────────────── */

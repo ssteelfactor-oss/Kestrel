@@ -317,7 +317,10 @@ typedef struct _KESTREL_GRAPH {
     KESTREL_GRAPH_EDGE       *pEdges;
     DWORD                     cEdges;
     DWORD                     cEdgesCapacity;
-    KESTREL_GRAPH_HASH_ENTRY  rgHash[KESTREL_GRAPH_HASH_SIZE];
+    KESTREL_GRAPH_HASH_ENTRY *pHash;       /* dynamic; grows + rehashes  */
+    DWORD                     dwHashSize;   /* current slot count (pow2)  */
+    DWORD                     dwHashMask;   /* dwHashSize - 1             */
+    BOOL                      bTruncated;   /* set only if a grow failed  */
     DWORD                     cACLEdges;
     DWORD                     cMemberEdges;
     DWORD                     cDelegEdges;
