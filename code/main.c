@@ -19,7 +19,7 @@
  *   --trust        Domain/forest trust posture
  *   --gmsa         gMSA password reader enumeration
  *   --adcs         ADCS certificate-template / CA audit (ESC1-5/9)
- *   --gpp          GPP cpassword recovery (SYSVOL)
+ *   --gpp          SYSVOL secret sweep — GPP cpassword + unattend + script creds
  *
  * Output:
  *   --report <path>  Generate report (.html / .json / .yaml)
@@ -77,7 +77,7 @@ KestrelPrintHelp(VOID)
         L"  --trust        Domain/forest trust posture audit\n"
         L"  --gmsa         gMSA password reader enumeration\n"
         L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
-        L"  --gpp          GPP cpassword recovery (SYSVOL/SMB)\n\n"
+        L"  --gpp          SYSVOL secret sweep (GPP cpassword + unattend + script creds)\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n"
         L"  --opengraph <path>  Export BloodHound CE OpenGraph JSON\n"
@@ -553,7 +553,7 @@ int wmain(int argc, wchar_t *argv[])
     }
 
     if (cfg.bRunGPP) {
-        wprintf(L"\n═══ Kestrel v0.7 — GPP cpassword (SYSVOL) ═══\n\n");
+        wprintf(L"\n═══ Kestrel — SYSVOL Secret Sweep ═══\n\n");
         hr = KestrelRunGPPScan(wszDomainNC, &pGPP);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunGPPScan failed: 0x%08X\n", hr);

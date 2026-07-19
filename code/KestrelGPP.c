@@ -1,5 +1,5 @@
 /*
- * KestrelGPP.c — v0.7  Group Policy Preferences cpassword recovery
+ * KestrelGPP.c — v0.7/v0.16  SYSVOL secret sweep (GPP cpassword + answer files + scripts)
  *
  * Group Policy Preferences could store credentials (local admins, mapped-drive
  * creds, service / scheduled-task run-as accounts) in XML files on SYSVOL,
@@ -9,7 +9,7 @@
  * proving the credential is recoverable so it can be rotated.
  *
  * Footprint: like KestrelPolicy.c this steps outside LDAP. It reads files from
- * \\<domain>\SYSVOL\<domain>\Policies over SMB. Normal for any domain member,
+ * \\<domain>\SYSVOL\<domain> over SMB (Policies + scripts). Normal for any member,
  * but a file-share read, not an LDAP query.
  *
  * Scope (v1): cpassword across all Preference types (Groups, Services,
@@ -316,6 +316,62 @@ static void _GppScanXml(_In_z_ LPCWSTR pwszPath, _Inout_ KESTREL_GPP_SCAN_RESULT
         if (rem == 0) break;
     }
 
+    /* answer-file / unattend credential fields (same buffer, one report/file) */
+    if (_GppFindCI(buf, cbRead, "AdministratorPassword") ||
+        _GppFindCI(buf, cbRead, "<AutoLogon>") ||
+        (_GppFindCI(buf, cbRead, "<Password>") && _GppFindCI(buf, cbRead, "unattend"))) {
+        wprintf(L"  [UNATTEND] %s — answer-file credential field (deployment secret)\n",
+                pwszPath);
+        pResult->cUnattend++;
+    }
+
+    SecureZeroMemory(buf, cbRead);
+    HeapFree(GetProcessHeap(), 0, buf);
+}
+
+/* Scripts / INF: flag hardcoded-credential patterns (one report per file). */
+static void _SysvolScanText(_In_z_ LPCWSTR pwszPath,
+                            _Inout_ KESTREL_GPP_SCAN_RESULT *pResult)
+{
+    static const char *rgPat[] = {
+        "-asplaintext", "convertto-securestring", "password=", "passwd=",
+        "pwd=", "/savecred", "cpassword"
+    };
+    HANDLE h;
+    DWORD  cbFile, cbRead = 0;
+    char  *buf;
+    int    i;
+
+    h = CreateFileW(pwszPath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+
+    cbFile = GetFileSize(h, NULL);
+    if (cbFile == INVALID_FILE_SIZE || cbFile == 0 || cbFile > (1u << 20)) {
+        CloseHandle(h); return;
+    }
+    buf = (char *)HeapAlloc(GetProcessHeap(), 0, (SIZE_T)cbFile + 1);
+    if (!buf) { CloseHandle(h); return; }
+    if (!ReadFile(h, buf, cbFile, &cbRead, NULL) || cbRead == 0) {
+        HeapFree(GetProcessHeap(), 0, buf); CloseHandle(h); return;
+    }
+    CloseHandle(h);
+    buf[cbRead] = '\0';
+    pResult->cFilesScanned++;
+
+    for (i = 0; i < ARRAYSIZE(rgPat); i++) {
+        const char *hit = _GppFindCI(buf, cbRead, rgPat[i]);
+        if (hit) {
+            DWORD       line = 1;
+            const char *q;
+            for (q = buf; q < hit; q++) if (*q == '\n') line++;
+            wprintf(L"  [SCRIPT-CRED] %s:%lu — hardcoded credential pattern (%S)\n",
+                    pwszPath, line, rgPat[i]);
+            pResult->cScriptCred++;
+            break;
+        }
+    }
+
     SecureZeroMemory(buf, cbRead);
     HeapFree(GetProcessHeap(), 0, buf);
 }
@@ -349,9 +405,16 @@ static void _GppWalkDir(_In_z_ LPCWSTR pwszDir, int depth,
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             _GppWalkDir(wszChild, depth + 1, pResult);
         } else {
-            size_t len = wcslen(fd.cFileName);
-            if (len > 4 && _wcsicmp(fd.cFileName + len - 4, L".xml") == 0)
+            size_t  len = wcslen(fd.cFileName);
+            LPCWSTR e4  = (len >= 4) ? fd.cFileName + len - 4 : NULL;
+            if (e4 && _wcsicmp(e4, L".xml") == 0)
                 _GppScanXml(wszChild, pResult);
+            else if (e4 && (_wcsicmp(e4, L".bat") == 0 || _wcsicmp(e4, L".cmd") == 0 ||
+                            _wcsicmp(e4, L".ps1") == 0 || _wcsicmp(e4, L".vbs") == 0 ||
+                            _wcsicmp(e4, L".inf") == 0))
+                _SysvolScanText(wszChild, pResult);
+            else if (len >= 5 && _wcsicmp(fd.cFileName + len - 5, L".psm1") == 0)
+                _SysvolScanText(wszChild, pResult);
         }
     } while (FindNextFileW(h, &fd));
 
@@ -364,12 +427,12 @@ static void _GppWalkDir(_In_z_ LPCWSTR pwszDir, int depth,
 
 static void _GppPrint(_In_ const KESTREL_GPP_SCAN_RESULT *pResult)
 {
-    wprintf(L"\n  GPP: %lu XML file(s) scanned  |  %lu cpassword finding(s)\n",
-            pResult->cFilesScanned, pResult->cFindings);
+    wprintf(L"\n  SYSVOL sweep: %lu file(s) scanned  |  %lu cpassword  |  %lu answer-file  |  %lu script cred\n",
+            pResult->cFilesScanned, pResult->cFindings, pResult->cUnattend, pResult->cScriptCred);
 
     if (pResult->cFindings == 0) {
         wprintf(L"\n  [*] No GPP cpassword found in SYSVOL.\n\n");
-        return;
+        return;   /* answer-file / script findings were printed inline during the walk */
     }
 
     wprintf(L"\n  [!] Recoverable credentials — decrypted with the public MS14-025 key.\n");
@@ -433,7 +496,7 @@ HRESULT KestrelRunGPPScan(
     }
 
     if (FAILED(StringCchPrintfW(wszBase, ARRAYSIZE(wszBase),
-            L"\\\\%s\\SYSVOL\\%s\\Policies", wszDns, wszDns))) {
+            L"\\\\%s\\SYSVOL\\%s", wszDns, wszDns))) {
         *ppResult = pResult;
         return S_OK;
     }
@@ -443,7 +506,7 @@ HRESULT KestrelRunGPPScan(
     KTRACE(L"GPP: %lu files, %lu findings", pResult->cFilesScanned, pResult->cFindings);
 
     if (pResult->cFilesScanned == 0)
-        wprintf(L"\n  [*] SYSVOL Policies tree empty or unreachable (%s).\n\n", wszBase);
+        wprintf(L"\n  [*] SYSVOL tree empty or unreachable (%s).\n\n", wszBase);
 
     _GppPrint(pResult);
     *ppResult = pResult;

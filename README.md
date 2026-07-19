@@ -165,17 +165,19 @@ Restricted Groups in each GPO's `GptTmpl.inf` push local-group membership onto e
 **"What ACL misconfigurations is nobody checking?" - delegation & ACL structure (ADeleg-class)**
 
 ```
-Kestrel.exe --acl        # owner ≠ admin · disabled inheritance · non-canonical order · orphaned trustees · low-priv → Tier-0
+Kestrel.exe --acl        # owner ≠ admin · disabled inheritance · non-canonical order · orphaned trustees · low-priv → Tier-0 · OWNER RIGHTS / hidden-object persistence
 Kestrel.exe --schema     # schema defaultSecurityDescriptor backdoor
 ```
 
 Structural checks that catch what a right-by-right blacklist misses, in the spirit of ADeleg: an object **owned by a non-admin** (a hidden GenericAll), an object with **inheritance disabled** (fallen out of the domain's ACL model), a **non-canonical DACL** (ACEs hand-edited out of order), an **ACE for an orphaned trustee** (unresolvable SID left by a deleted account), and - the flagship - any **low-privilege trustee (Everyone / Authenticated Users / Domain Users) with an edge into a Tier-0 resource**. `--schema` separately parses every class's `defaultSecurityDescriptor` and flags one that grants a dangerous right to a low-priv principal - a backdoor that makes every future object of that class born controllable.
 
-**"Certificate escalation?" - ADCS ESC1-5/9**
+**"Certificate escalation - and persistence?" - ADCS ESC1-5/9 + backdoors**
 
 ```
 Kestrel.exe --adcs
 ```
+
+Beyond the ESC1-5/9 escalation checks, `--adcs` also audits two persistence surfaces: the **NTAuth store**, flagging any CA trusted for client-auth that is not a published Enterprise CA (a forge-any-user backdoor, SHA-1 thumbprint reported), and **template validity**, flagging templates whose issued certs live longer than five years (a credential that survives a password reset).
 
 **"gMSA password readers?"**
 
@@ -183,11 +185,13 @@ Kestrel.exe --adcs
 Kestrel.exe --gmsa
 ```
 
-**"Cleartext creds in SYSVOL?" - GPP cpassword**
+**"Cleartext creds in SYSVOL?" - GPP cpassword + answer files + scripts**
 
 ```
 Kestrel.exe --gpp
 ```
+
+Sweeps the whole `\\<domain>\SYSVOL\<domain>` tree (Policies **and** scripts), not just GPP: decrypts GPP `cpassword` (MS14-025), flags **answer-file** deployment secrets (`unattend.xml` / `sysprep`), and flags **scripts** (`.bat` / `.cmd` / `.ps1` / `.vbs` / `.psm1`) with hardcoded-credential patterns, with the offending line reported.
 
 **"Trust / cross-forest exposure?"**
 
@@ -285,7 +289,7 @@ Kestrel.exe --report C:\out\report.html --opengraph C:\out\kestrel.json
 | `--trust`        | Domain/forest trust posture                                        |
 | `--gmsa`         | gMSA password-reader enumeration                                   |
 | `--adcs`         | ADCS certificate-template / CA audit (ESC1-5/9)                     |
-| `--gpp`          | GPP cpassword recovery from SYSVOL (MS14-025)                       |
+| `--gpp`          | SYSVOL secret sweep - GPP cpassword (MS14-025) + unattend + script creds |
 | `--all`          | Run all modules explicitly                                          |
 | `--report <f>`   | Report file (`.html` / `.json` / `.yaml` by extension)             |
 | `--opengraph <f>`| BloodHound CE OpenGraph JSON export                                 |
@@ -425,6 +429,8 @@ A right-by-right blacklist (GenericAll, DCSync, …) misses *structural* ACL pro
 
 Separately, `--schema` (`KestrelSchemaAudit.c`) reads every `classSchema` object's `defaultSecurityDescriptor` and, rather than diffing against a brittle per-version baseline, parses the SDDL and flags any ACE granting a dangerous right to a low-privilege principal. That default is stamped onto the DACL of every **new** object of the class, so a single edit is a silent, forward-looking, domain-wide backdoor with no ACE on any existing object to find; flagged classes carry `defaultSecurityDescriptor` provenance.
 
+The same DACL walk also surfaces two stealth-persistence markers. An explicit **OWNER RIGHTS (`S-1-3-4`)** ACE modifies the object owner's *implicit* control: attackers add `OWNER RIGHTS: deny WriteDacl` after planting a backdoor ACE so even the legitimate owner (an admin) can no longer rewrite the DACL to remove it. And a **deny-read ACE for a broad principal** (Everyone / Authenticated Users / Domain Users) that denies read/list rights **hides the object from enumeration** - a hidden user, group, or container holding persistence that SharpHound and ADUC never show. Both are reported per object during `--acl`.
+
 ### v0.7 Domain trust posture (`KestrelTrust.c`)
 
 Enumerates `trustedDomain` objects and decodes direction, type, and `trustAttributes`. Flags missing SID filtering on **inbound external** trusts (the classic sIDHistory-injection surface), TGT delegation across a trust, and RC4. Within-forest and forest-transitive trusts are excluded from the SID-filter check - they filter by default, so flagging them would be a false positive. Since v0.10 trusts also feed the graph as domain→domain `Trusts` edges.
@@ -452,9 +458,11 @@ Findings are cross-referenced against templates actually published by a CA - an 
 
 ESC6 (CA registry flag), ESC7 (CA role ACL), and ESC8 (web-enrollment endpoint) are intentionally **out of scope**: none is observable from a passive LDAP read. Since v0.10, ESC1/2/3/9 (enrollee) and ESC4/5 (template/CA writer) also feed the graph as `ADCS_ESC` edges to the domain node.
 
-### v0.7 GPP cpassword recovery (`KestrelGPP.c`)
+Since v0.16 the module also covers two **persistence** surfaces. The **NTAuth store** (`CN=NTAuthCertificates`) lists every CA trusted to issue client-authentication certificates for any principal; each entry is SHA-1-matched against the published Enterprise CA set (`pKIEnrollmentService`), and any cert that does not match is flagged as a possible forge-any-user backdoor (DPERSIST1) with its thumbprint. **Template validity** is read from `pKIExpirationPeriod`: a template that issues certificates valid for more than five years is flagged, because such a certificate keeps authenticating long after the owner's password is reset. SHA-1 uses CNG (`bcrypt`), already linked - no new dependency.
 
-Walks SYSVOL over SMB and parses every Group Policy Preferences XML (Groups, Services, ScheduledTasks, DataSources, Drives, Printers) for `cpassword` - credentials AES-encrypted with the key Microsoft published in 2014 (MS14-025). Any domain user can recover them, so they are decrypted and shown (with the account and GPO) to prove recoverability and force rotation. Largely legacy, but old values persist on SYSVOL for years. Same footprint as the policy audit (an SMB read of SYSVOL). Plaintext buffers are scrubbed with `SecureZeroMemory`.
+### v0.7/v0.16 SYSVOL secret sweep (`KestrelGPP.c`)
+
+Walks the whole `\\<domain>\SYSVOL\<domain>` tree over SMB (Policies **and** scripts). Its original job - parsing every Group Policy Preferences XML (Groups, Services, ScheduledTasks, DataSources, Drives, Printers) for `cpassword`, AES-encrypted with the key Microsoft published in 2014 (MS14-025) and therefore recoverable by any domain user - still runs: those are decrypted and shown with account and GPO to force rotation. Since v0.16 the same walk also flags **answer files** (`unattend.xml` / `autounattend.xml` / `sysprep`) that carry deployment passwords, and **scripts** (`.bat` / `.cmd` / `.ps1` / `.vbs` / `.psm1`) containing hardcoded-credential patterns (`ConvertTo-SecureString -AsPlainText`, `password=`, `/savecred`, …), reporting the offending line. Files are capped at 1 MB, recursion at depth 8; plaintext buffers are scrubbed with `SecureZeroMemory`.
 
 ### v0.8 Default-ACL baseline (`KestrelBaseline.c`)
 
@@ -479,7 +487,7 @@ Not a scan but a filter for the ACL module. It builds a baseline of "expected" A
 | v0.13   | ✅      | **Entry-condition posture** — domain password policy + Fine-Grained PSOs (spray-friendliness) · krbtgt password age (Golden Ticket exposure) · noPac / Certifried surfacing from MachineAccountQuota |
 | v0.14   | ✅      | **ACL depth + lateral edges** — fine-grained dangerous ACEs (`ForceChangePassword` / `WriteSPN` / `AddKeyCredentialLink` / `AddSelf`) · GPO→lateral edges (`AdminTo` / `CanRDP` / `CanPSRemote` / `ExecuteDCOM`) · password-hygiene triad (`PASSWD_NOTREQD` / `DONT_EXPIRE_PASSWORD` / description passwords) |
 | v0.15   | ✅      | **ACL structure audit (ADeleg-class)** — owner ≠ admin · disabled inheritance · non-canonical DACL · orphaned trustees · low-priv → Tier-0 aggregation · schema `defaultSecurityDescriptor` backdoor |
-| v0.16   | 🔲      | **Stealth persistence + SYSVOL/ADCS depth** — hidden-object / OWNER RIGHTS (`S-1-3-4`) deny-ACE persistence · unattend.xml + SYSVOL secret sweep · ADCS persistence (template validity + NTAuth store) |
+| v0.16   | ✅      | **Stealth persistence + SYSVOL/ADCS depth** — hidden-object / OWNER RIGHTS (`S-1-3-4`) deny-ACE persistence · unattend.xml + SYSVOL secret sweep · ADCS persistence (template validity + NTAuth store) |
 | v0.17   | 🔲      | **Cross-domain + hybrid footprint** — foreign security principals in privileged groups · Entra Connect (`MSOL_` / `AAD_`) Tier-0 tagging · ADFS DKM key ACL (Golden SAML precondition) |
 | v0.18   | 🔲      | **Query hygiene + honest footprint** — minimal `SDflags` / security-mask · attribute-list & filter-indexability audit · "Detection footprint" documentation (how each scan appears in event 1644) |
 | v1.0    | 🔲      | Feature-complete for the on-prem, directory-side posture mission |
@@ -487,14 +495,7 @@ Not a scan but a filter for the ACL module. It builds a baseline of "expected" A
 
 ## Screens
 
-ADWS scanning in progress…
-[![Kestrel output](https://github.com/ssteelfactor-oss/Kestrel/raw/main/assets/ADWSScan.png)](/ssteelfactor-oss/Kestrel/blob/main/assets/ADWSScan.png)
 
-Stale / active points detecting…
-[![Kestrel output](https://github.com/ssteelfactor-oss/Kestrel/raw/main/assets/stall-active.png)](/ssteelfactor-oss/Kestrel/blob/main/assets/stall-active.png)
-
-Searching domain SIDs…
-[![Kestrel output](https://github.com/ssteelfactor-oss/Kestrel/raw/main/assets/DomainSID.png)](/ssteelfactor-oss/Kestrel/blob/main/assets/DomainSID.png)
 
 ## Code quality
 

@@ -504,6 +504,9 @@ typedef struct _KESTREL_ADCS_SCAN_RESULT {
     DWORD                 cCapacity;
     DWORD                 cTemplates;     /* templates examined         */
     DWORD                 cVulnerable;    /* findings with >= 1 ESC      */
+    DWORD                 cLongValidity;  /* templates w/ long validity  */
+    DWORD                 cNtauthCerts;   /* CA certs in NTAuth store     */
+    DWORD                 cNtauthRogue;   /* NTAuth certs not an Ent. CA  */
 } KESTREL_ADCS_SCAN_RESULT;
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -524,6 +527,8 @@ typedef struct _KESTREL_GPP_SCAN_RESULT {
     DWORD                cFindings;
     DWORD                cCapacity;
     DWORD                cFilesScanned;
+    DWORD                cUnattend;      /* answer-file password fields   */
+    DWORD                cScriptCred;    /* scripts w/ hardcoded creds     */
 } KESTREL_GPP_SCAN_RESULT;
 
 /* ════════════════════════════════════════════════════════════════════════════

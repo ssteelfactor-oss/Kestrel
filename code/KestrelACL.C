@@ -125,6 +125,25 @@ _HygieneAceSid(_In_ ACE_HEADER *pAce)
  *   orphaned trustee    — an explicit ACE for a domain SID (RID >= 1000) that
  *     no longer resolves: residue of a deleted account, and a SID that could be
  *     re-created / re-used. */
+
+/* Broad low-privilege trustees whose deny-read ACE hides an object from enum. */
+static BOOL
+_HygieneBroadSid(_In_opt_z_ LPCWSTR sid)
+{
+    LPCWSTR r;
+    if (!sid || !sid[0]) return FALSE;
+    if (_wcsicmp(sid, L"S-1-1-0")  == 0) return TRUE;   /* Everyone            */
+    if (_wcsicmp(sid, L"S-1-5-11") == 0) return TRUE;   /* Authenticated Users */
+    r = wcsrchr(sid, L'-');
+    if (r && _wcsicmp(r + 1, L"513") == 0) return TRUE; /* Domain Users        */
+    return FALSE;
+}
+
+/* Read/list rights whose denial to a broad principal hides the object. */
+#define KESTREL_HIDE_READ_MASK \
+    (READ_CONTROL | ADS_RIGHT_DS_READ_PROP | ADS_RIGHT_ACTRL_DS_LIST | \
+     ADS_RIGHT_DS_LIST_OBJECT | GENERIC_READ)
+
 static VOID
 _CheckDaclHygiene(_In_ PACL pDacl, _In_z_ LPCWSTR pwszDN)
 {
@@ -166,6 +185,31 @@ _CheckDaclHygiene(_In_ PACL pDacl, _In_z_ LPCWSTR pwszDN)
                 }
             }
             if (s) LocalFree(s);
+        }
+
+        /* Stealth-persistence markers (any ACE, inherited or explicit) */
+        {
+            BOOL   bDenyAce = (pAce->AceType == ACCESS_DENIED_ACE_TYPE ||
+                               pAce->AceType == ACCESS_DENIED_OBJECT_ACE_TYPE);
+            DWORD  dwMask   = ((ACCESS_ALLOWED_ACE *)pAce)->Mask; /* Mask offset is common */
+            PSID   pSid     = _HygieneAceSid(pAce);
+            LPWSTR s        = NULL;
+
+            if (pSid && IsValidSid(pSid) && ConvertSidToStringSidW(pSid, &s) && s) {
+                /* OWNER RIGHTS (S-1-3-4): explicit ACE modifies the owner's
+                   implicit control — a persistence-hardening marker (owner
+                   can't rewrite the DACL to remove a planted ACE). */
+                if (_wcsicmp(s, L"S-1-3-4") == 0)
+                    wprintf(L"  [OWNER-RIGHTS] %s — explicit OWNER RIGHTS ACE (%s) modifies owner control\n",
+                            pwszDN, bDenyAce ? L"deny" : L"allow");
+
+                /* Deny-read to a broad principal hides the object from enum. */
+                if (bDenyAce && (dwMask & KESTREL_HIDE_READ_MASK) && _HygieneBroadSid(s))
+                    wprintf(L"  [HIDDEN] %s — deny-read ACE for %s (object hidden from enumeration)\n",
+                            pwszDN, s);
+
+                LocalFree(s);
+            }
         }
     }
 }

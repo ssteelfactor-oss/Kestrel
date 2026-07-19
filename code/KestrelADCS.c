@@ -25,6 +25,7 @@
  */
 
 #include "../include/Kestrel.h"
+#include <bcrypt.h>
 
 /* ── Control-access right GUIDs ─────────────────────────────────────────────── */
 static const GUID GUID_ENROLL =
@@ -443,7 +444,8 @@ static HRESULT _AdcsScanTemplates(_In_ IDirectorySearch *pSearch,
     static LPWSTR rgAttrs[] = {
         L"cn", L"displayName",
         L"msPKI-Certificate-Name-Flag", L"msPKI-Enrollment-Flag",
-        L"msPKI-RA-Signature", L"pKIExtendedKeyUsage", L"nTSecurityDescriptor"
+        L"msPKI-RA-Signature", L"pKIExtendedKeyUsage", L"nTSecurityDescriptor",
+        L"pKIExpirationPeriod"
     };
 
     hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
@@ -474,6 +476,30 @@ static HRESULT _AdcsScanTemplates(_In_ IDirectorySearch *pSearch,
         _AdcsColInt(pSearch, hRow, (LPWSTR)L"msPKI-Enrollment-Flag",       &dwEnrollFlag);
         _AdcsColInt(pSearch, hRow, (LPWSTR)L"msPKI-RA-Signature",          &dwRaSig);
         _AdcsClassifyEku(pSearch, hRow, &bAuth, &bAny, &bAgent);
+
+        /* Long validity period = long-lived cert persistence (survives a
+           password reset until the cert expires). Read pKIExpirationPeriod
+           (8-byte LE, negative 100 ns intervals) and flag > 5 years. */
+        {
+            ADS_SEARCH_COLUMN col;
+            if (pSearch->lpVtbl->GetColumn(pSearch, hRow,
+                    (LPWSTR)L"pKIExpirationPeriod", &col) == S_OK) {
+                if (col.dwADsType == ADSTYPE_OCTET_STRING && col.dwNumValues &&
+                    col.pADsValues[0].OctetString.dwLength >= 8) {
+                    LONGLONG ll;
+                    memcpy(&ll, col.pADsValues[0].OctetString.lpValue, sizeof(ll));
+                    /* value is negative; seconds = -ll / 10^7 */
+                    double years = ((double)(-ll) / 10000000.0) / (365.25 * 86400.0);
+                    if (years > 5.0) {
+                        wprintf(L"  [LONG-VALIDITY] template \"%s\" — validity ~%.0f years "
+                                L"(long-lived cert persistence)\n",
+                                f.wszName[0] ? f.wszName : L"?", years);
+                        pResult->cLongValidity++;
+                    }
+                }
+                pSearch->lpVtbl->FreeColumn(pSearch, &col);
+            }
+        }
 
         ZeroMemory(&v, sizeof(v));
         pSD = _AdcsGetSd(pSearch, hRow);
@@ -559,8 +585,10 @@ static void _AdcsEscList(_In_ const KESTREL_ADCS_FINDING *pF,
 
 static void _AdcsPrint(_In_ const KESTREL_ADCS_SCAN_RESULT *pResult)
 {
-    wprintf(L"\n  ADCS: %lu template(s) examined  |  %lu finding(s)\n",
-            pResult->cTemplates, pResult->cVulnerable);
+    wprintf(L"\n  ADCS: %lu template(s) examined  |  %lu finding(s)  |  "
+            L"%lu long-validity  |  NTAuth %lu cert(s), %lu unrecognized\n",
+            pResult->cTemplates, pResult->cVulnerable, pResult->cLongValidity,
+            pResult->cNtauthCerts, pResult->cNtauthRogue);
 
     if (pResult->cFindings == 0) {
         wprintf(L"\n  [*] No ESC1-5/9 misconfigurations detected.\n\n");
@@ -599,6 +627,99 @@ VOID KestrelFreeADCSScanResult(
     if (pResult->rgFindings)
         HeapFree(GetProcessHeap(), 0, pResult->rgFindings);
     HeapFree(GetProcessHeap(), 0, pResult);
+}
+
+/* SHA-1 thumbprint of a DER cert via CNG (bcrypt already linked). */
+static BOOL
+_AdcsSha1(_In_reads_bytes_(cb) const BYTE *p, DWORD cb, _Out_writes_(20) BYTE out[20])
+{
+    BCRYPT_ALG_HANDLE  hAlg = NULL;
+    BCRYPT_HASH_HANDLE hH   = NULL;
+    BOOL ok = FALSE;
+    if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA1_ALGORITHM, NULL, 0) == 0 &&
+        BCryptCreateHash(hAlg, &hH, NULL, 0, NULL, 0, 0) == 0 &&
+        BCryptHashData(hH, (PUCHAR)p, cb, 0) == 0 &&
+        BCryptFinishHash(hH, out, 20, 0) == 0)
+        ok = TRUE;
+    if (hH)   BCryptDestroyHash(hH);
+    if (hAlg) BCryptCloseAlgorithmProvider(hAlg, 0);
+    return ok;
+}
+
+/* NTAuth store audit (ADCS persistence, DPERSIST1): every CA cert in the NTAuth
+ * store is trusted to issue client-auth certs for ANY principal. A CA there that
+ * is not a published Enterprise CA is a domain-wide forge-any-user backdoor.
+ * We compare each NTAuth cert (by SHA-1) against the Enrollment Services CA set. */
+#define KESTREL_NTAUTH_MAX 32
+static VOID
+_AdcsAuditNTAuth(_In_ IDirectorySearch *pSearch,
+                 _In_z_ LPCWSTR pwszConfigNC,
+                 _Inout_ KESTREL_ADCS_SCAN_RESULT *pResult)
+{
+    BYTE  rgEnt[KESTREL_NTAUTH_MAX][20];
+    DWORD cEnt = 0;
+    ADS_SEARCH_HANDLE hRow = NULL;
+    ADS_SEARCH_COLUMN col;
+    HRESULT hr;
+    DWORD i, v;
+
+    UNREFERENCED_PARAMETER(pwszConfigNC);
+
+    /* 1) collect Enrollment Services CA thumbprints (the legitimate set) */
+    {
+        static LPWSTR rgA[] = { (LPWSTR)L"cACertificate" };
+        hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+                (LPWSTR)L"(objectClass=pKIEnrollmentService)", rgA, 1, &hRow);
+        if (SUCCEEDED(hr)) {
+            while (pSearch->lpVtbl->GetNextRow(pSearch, hRow) == S_OK) {
+                if (pSearch->lpVtbl->GetColumn(pSearch, hRow,
+                        (LPWSTR)L"cACertificate", &col) != S_OK) continue;
+                if (col.dwADsType == ADSTYPE_OCTET_STRING)
+                    for (v = 0; v < col.dwNumValues && cEnt < KESTREL_NTAUTH_MAX; v++)
+                        if (_AdcsSha1(col.pADsValues[v].OctetString.lpValue,
+                                      col.pADsValues[v].OctetString.dwLength, rgEnt[cEnt]))
+                            cEnt++;
+                pSearch->lpVtbl->FreeColumn(pSearch, &col);
+            }
+            pSearch->lpVtbl->CloseSearchHandle(pSearch, hRow);
+            hRow = NULL;
+        }
+    }
+
+    /* 2) read the NTAuth store and check each CA cert against that set */
+    {
+        static LPWSTR rgA[] = { (LPWSTR)L"cACertificate" };
+        hr = pSearch->lpVtbl->ExecuteSearch(pSearch,
+                (LPWSTR)L"(cn=NTAuthCertificates)", rgA, 1, &hRow);
+        if (FAILED(hr)) return;
+
+        while (pSearch->lpVtbl->GetNextRow(pSearch, hRow) == S_OK) {
+            if (pSearch->lpVtbl->GetColumn(pSearch, hRow,
+                    (LPWSTR)L"cACertificate", &col) != S_OK) continue;
+            if (col.dwADsType == ADSTYPE_OCTET_STRING) {
+                for (v = 0; v < col.dwNumValues; v++) {
+                    BYTE sha[20];
+                    BOOL bKnown = FALSE;
+                    pResult->cNtauthCerts++;
+                    if (!_AdcsSha1(col.pADsValues[v].OctetString.lpValue,
+                                   col.pADsValues[v].OctetString.dwLength, sha))
+                        continue;
+                    for (i = 0; i < cEnt; i++)
+                        if (memcmp(sha, rgEnt[i], 20) == 0) { bKnown = TRUE; break; }
+                    if (!bKnown) {
+                        WCHAR t[64] = L""; int k;
+                        for (k = 0; k < 20; k++)
+                            StringCchPrintfW(t + k * 2, 64 - k * 2, L"%02X", sha[k]);
+                        wprintf(L"  [NTAUTH-ROGUE] NTAuth CA not published as an Enterprise CA "
+                                L"— SHA1 %s (possible forge-any-user persistence)\n", t);
+                        pResult->cNtauthRogue++;
+                    }
+                }
+            }
+            pSearch->lpVtbl->FreeColumn(pSearch, &col);
+        }
+        pSearch->lpVtbl->CloseSearchHandle(pSearch, hRow);
+    }
 }
 
 _Must_inspect_result_
@@ -652,6 +773,8 @@ HRESULT KestrelRunADCSScan(
 
     hr = _AdcsScanTemplates(pSearch, &pub, pResult);
     if (FAILED(hr)) { KTRACE(L"ADCS: template pass failed 0x%08lX", hr); goto Cleanup; }
+
+    _AdcsAuditNTAuth(pSearch, pwszConfigNC, pResult);
 
     KTRACE(L"ADCS: %lu templates, %lu findings", pResult->cTemplates, pResult->cVulnerable);
 
