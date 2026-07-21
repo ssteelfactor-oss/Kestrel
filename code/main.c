@@ -19,6 +19,7 @@
  *   --trust        Domain/forest trust posture
  *   --gmsa         gMSA password reader enumeration
  *   --adcs         ADCS certificate-template / CA audit (ESC1-5/9)
+ *   --adfs         AD FS DKM key ACL audit (Golden SAML precondition)
  *   --gpp          SYSVOL secret sweep — GPP cpassword + unattend + script creds
  *
  * Output:
@@ -77,6 +78,7 @@ KestrelPrintHelp(VOID)
         L"  --trust        Domain/forest trust posture audit\n"
         L"  --gmsa         gMSA password reader enumeration\n"
         L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
+        L"  --adfs         AD FS DKM key ACL audit (Golden SAML precondition)\n"
         L"  --gpp          SYSVOL secret sweep (GPP cpassword + unattend + script creds)\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n"
@@ -123,6 +125,7 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunTrust      = TRUE;
     pCfg->bRunGMSA       = TRUE;
     pCfg->bRunADCS       = TRUE;
+    pCfg->bRunADFS       = TRUE;
     pCfg->bRunGPP        = TRUE;
 }
 
@@ -311,6 +314,11 @@ KestrelParseArgs(
         }
         if (_wcsicmp(arg, L"--adcs") == 0) {
             pCfg->bRunADCS = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--adfs") == 0) {
+            pCfg->bRunADFS = TRUE;
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -573,6 +581,14 @@ int wmain(int argc, wchar_t *argv[])
         KTRACE(L"ADCS scan complete — templates: %lu, findings: %lu",
             pADCS ? pADCS->cTemplates : 0,
             pADCS ? pADCS->cVulnerable : 0);
+    }
+
+    /* ── v0.17: AD FS DKM key ACL audit (Golden SAML precondition) ── */
+    if (cfg.bRunADFS) {
+        wprintf(L"\n═══ Kestrel — AD FS DKM Key ACL ═══\n");
+        hr = KestrelRunADFSDkmScan(wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunADFSDkmScan failed: 0x%08X\n", hr);
     }
 
     /* ── v0.7: gMSA password reader enumeration ──────────────────── */

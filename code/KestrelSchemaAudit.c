@@ -60,22 +60,22 @@ _AceSid(_In_ ACE_HEADER *pAce)
 static BOOL
 _SddlGrantsLowPriv(_In_z_ LPCWSTR pwszSddl, _In_z_ LPCWSTR pwszClass)
 {
-    PSECURITY_DESCRIPTOR pSD = NULL;
-    PACL   pDacl = NULL;
+    PSECURITY_DESCRIPTOR pSD = 0;
+    PACL   pDacl = 0;
     BOOL   bPresent = FALSE, bDefault = FALSE, bHit = FALSE;
-    WORD   i;
+    WORD   i = 0;
 
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            pwszSddl, SDDL_REVISION_1, &pSD, NULL))
+            pwszSddl, SDDL_REVISION_1, &pSD, 0))
         return FALSE;
 
     if (GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDefault) &&
         bPresent && pDacl) {
         for (i = 0; i < pDacl->AceCount; i++) {
-            ACE_HEADER *pAce = NULL;
-            ACCESS_MASK mask;
-            PSID        pSid;
-            LPWSTR      s = NULL;
+            ACE_HEADER *pAce = 0;
+            ACCESS_MASK mask = { 0 };
+            PSID        pSid = 0;
+            LPWSTR      s = 0;
 
             if (!GetAce(pDacl, i, (LPVOID *)&pAce) || !pAce) continue;
             if (pAce->AceType != ACCESS_ALLOWED_ACE_TYPE &&
@@ -106,13 +106,13 @@ _Must_inspect_result_
 HRESULT
 KestrelRunSchemaAuditScan(_In_z_ LPCWSTR pwszDomainNC)
 {
-    HRESULT             hr;
-    IADs               *pRootDSE = NULL;
-    IDirectorySearch   *pS = NULL;
-    ADS_SEARCH_HANDLE   h = NULL;
+    HRESULT             hr = 0;
+    IADs               *pRootDSE = 0;
+    IDirectorySearch   *pS = 0;
+    ADS_SEARCH_HANDLE   h = 0;
     VARIANT             vSchema;
-    WCHAR               wszSchemaPath[600];
-    ADS_SEARCHPREF_INFO prefs[2];
+    WCHAR               wszSchemaPath[600] = { 0 };
+    ADS_SEARCHPREF_INFO prefs[2] = { 0 } ;
     DWORD               cClasses = 0, cFlagged = 0;
     LPWSTR rgAttrs[] = {
         (LPWSTR)L"lDAPDisplayName",

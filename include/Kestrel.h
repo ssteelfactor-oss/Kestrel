@@ -81,6 +81,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunHygiene;     /* credential hygiene (UAC flags + desc)  */
     BOOL bRunGpoLateral;  /* GPO local-group → lateral edges        */
     BOOL bRunSchemaAudit; /* schema defaultSecurityDescriptor audit */
+    BOOL bRunADFS;        /* v0.17 AD FS DKM key ACL audit          */
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
@@ -221,6 +222,7 @@ typedef struct _KESTREL_MEMBER {
     WCHAR   wszSid[128];
     WCHAR   wszClass[64];
     BOOL    bEnabled;
+    BOOL    bForeign;    /* foreignSecurityPrincipal — cross-domain trustee */
     struct _KESTREL_MEMBER *pNext;
 } KESTREL_MEMBER;
 
@@ -230,6 +232,7 @@ typedef struct _KESTREL_GROUP_RESULT {
     KESTREL_MEMBER   *pMembers;
     DWORD             cMembers;
     DWORD             cEnabled;
+    DWORD             cForeign;    /* foreign security principals in this group */
     struct _KESTREL_GROUP_RESULT *pNext;
 } KESTREL_GROUP_RESULT;
 
@@ -237,6 +240,7 @@ typedef struct _KESTREL_GROUP_SCAN_RESULT {
     KESTREL_GROUP_RESULT *pGroups;
     DWORD                 cGroups;
     DWORD                 cErrors;
+    DWORD                 cForeign;    /* total FSPs across privileged groups */
 } KESTREL_GROUP_SCAN_RESULT;
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -844,6 +848,12 @@ HRESULT KestrelRunADCSScan(
 
 VOID KestrelFreeADCSScanResult(
     _In_opt_ _Post_ptr_invalid_ KESTREL_ADCS_SCAN_RESULT *pResult);
+
+/* AD FS DKM key ACL audit (Golden SAML precondition). Best-effort: prints
+ * non-default read grants on the DKM key; silently no-ops if AD FS absent. */
+_Must_inspect_result_
+HRESULT KestrelRunADFSDkmScan(
+    _In_z_ LPCWSTR pwszDomainNC);
 
 /* ════════════════════════════════════════════════════════════════════════════
  * KestrelGPP.c — v0.7

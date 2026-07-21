@@ -302,6 +302,23 @@ KestrelTagHighValue(_Inout_ KESTREL_GRAPH *pGraph)
         for (DWORD k = 0; !bHV && k < ARRAYSIZE(rgAbsSid); k++)
             if (_wcsicmp(pN->wszSid, rgAbsSid[k]) == 0) bHV = TRUE;
 
+        /* Entra Connect / AAD Connect sync account: it holds DCSync on the
+           domain (de-facto Tier-0) but has a random RID, so the SID checks
+           above miss it. Recognize the account-name prefix Microsoft assigns
+           (MSOL_ / AAD_ for AAD Connect, Sync_ for Entra Cloud Sync). */
+        if (!bHV) {
+            LPCWSTR nm = pN->wszLabel[0] ? pN->wszLabel : pN->wszDN;
+            if (_wcsnicmp(nm, L"MSOL_", 5) == 0 ||
+                _wcsnicmp(nm, L"AAD_",  4) == 0 ||
+                _wcsnicmp(nm, L"Sync_", 5) == 0 ||
+                wcsstr(pN->wszDN, L"CN=MSOL_") != NULL ||
+                wcsstr(pN->wszDN, L"CN=AAD_")  != NULL) {
+                bHV = TRUE;
+                wprintf(L"  [ENTRA-SYNC] %s tagged Tier-0 (Entra Connect sync account — DCSync on domain)\n",
+                        pN->wszLabel[0] ? pN->wszLabel : pN->wszSid);
+            }
+        }
+
         if (bHV) {
             pN->bHighValue = TRUE;
             cHigh++;

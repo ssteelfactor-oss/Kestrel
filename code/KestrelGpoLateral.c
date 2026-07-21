@@ -42,7 +42,7 @@ _ReadGptTmpl(_In_z_ LPCWSTR pwszGpoPath)
 
     if (FAILED(StringCchPrintfW(wszInf, ARRAYSIZE(wszInf),
             L"%s\\Machine\\Microsoft\\Windows NT\\SecEdit\\GptTmpl.inf", pwszGpoPath)))
-        return NULL;
+        return 0;
 
     hFile = CreateFileW(wszInf, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                 NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -96,7 +96,7 @@ _Append(_Inout_ KESTREL_GPOLATERAL_SCAN_RESULT *pRes,
         _In_z_ LPCWSTR pwszPrin, _In_z_ LPCWSTR pwszCompSid,
         _In_z_ LPCWSTR pwszCompName, _In_ KESTREL_GRAPH_EDGE_TYPE type)
 {
-    KESTREL_GPOLAT_FINDING *pF;
+    KESTREL_GPOLAT_FINDING *pF = 0;
     if (pRes->cFindings == pRes->cCapacity) {
         DWORD nc = pRes->cCapacity ? pRes->cCapacity * 2 : 128;
         KESTREL_GPOLAT_FINDING *np = (KESTREL_GPOLAT_FINDING *)realloc(
@@ -119,10 +119,10 @@ _EmitForOu(_In_z_ LPCWSTR pwszOuDN, _In_z_ LPCWSTR pwszPrin,
            _In_ KESTREL_GRAPH_EDGE_TYPE type,
            _Inout_ KESTREL_GPOLATERAL_SCAN_RESULT *pRes)
 {
-    IDirectorySearch   *pS = NULL;
-    ADS_SEARCH_HANDLE   h = NULL;
-    WCHAR               wszPath[700];
-    ADS_SEARCHPREF_INFO prefs[2];
+    IDirectorySearch   *pS = 0;
+    ADS_SEARCH_HANDLE   h = 0;
+    WCHAR               wszPath[700] = { 0 };
+    ADS_SEARCHPREF_INFO prefs[2] = { 0 };
     LPWSTR attrs[] = { (LPWSTR)L"objectSid", (LPWSTR)L"sAMAccountName" };
 
     if (FAILED(StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszOuDN))) return;
@@ -176,8 +176,8 @@ _ResolveLinks(_In_ IDirectorySearch *pRoot, _In_z_ LPCWSTR pwszGpoCn,
               _In_z_ LPCWSTR pwszPrin, _In_ KESTREL_GRAPH_EDGE_TYPE type,
               _Inout_ KESTREL_GPOLATERAL_SCAN_RESULT *pRes)
 {
-    ADS_SEARCH_HANDLE h = NULL;
-    WCHAR             wszFilter[256];
+    ADS_SEARCH_HANDLE h = 0;
+    WCHAR             wszFilter[256] = { 0 };
     LPWSTR            attrs[] = { (LPWSTR)L"distinguishedName" };
 
     if (FAILED(StringCchPrintfW(wszFilter, ARRAYSIZE(wszFilter),
@@ -207,7 +207,7 @@ _ParseGroupMembership(_In_ IDirectorySearch *pRoot, _In_z_ LPCWSTR pwszText,
                       _Inout_ DWORD *pcGpoHits)
 {
     const WCHAR *p = wcsstr(pwszText, L"[Group Membership]");
-    const WCHAR *end;
+    const WCHAR *end = 0;
     BOOL bHit = FALSE;
 
     if (!p) return;
@@ -289,12 +289,12 @@ KestrelRunGpoLateralScan(
     _In_z_   LPCWSTR                         pwszDomainNC,
     _Outptr_ KESTREL_GPOLATERAL_SCAN_RESULT **ppResult)
 {
-    HRESULT             hr;
-    IDirectorySearch   *pPol = NULL, *pRoot = NULL;
-    ADS_SEARCH_HANDLE   h = NULL;
-    WCHAR               wszPolPath[600], wszRootPath[600];
-    ADS_SEARCHPREF_INFO prefs[2];
-    KESTREL_GPOLATERAL_SCAN_RESULT *pRes = NULL;
+    HRESULT             hr = 0;
+    IDirectorySearch   *pPol = 0, *pRoot = 0;
+    ADS_SEARCH_HANDLE   h = 0;
+    WCHAR               wszPolPath[600] = { 0 }, wszRootPath[600] = { 0 };
+    ADS_SEARCHPREF_INFO prefs[2] = { 0 };
+    KESTREL_GPOLATERAL_SCAN_RESULT *pRes = 0;
     DWORD               cGpoHits = 0;
     LPWSTR attrs[] = { (LPWSTR)L"cn", (LPWSTR)L"gPCFileSysPath", (LPWSTR)L"displayName" };
 
@@ -332,9 +332,9 @@ KestrelRunGpoLateralScan(
     if (FAILED(hr)) { wprintf(L"  [!] ExecuteSearch 0x%08X\n", hr); goto Cleanup; }
 
     while (pPol->lpVtbl->GetNextRow(pPol, h) != S_ADS_NOMORE_ROWS) {
-        ADS_SEARCH_COLUMN col;
+        ADS_SEARCH_COLUMN col = { 0 };
         WCHAR  wszCn[64] = L"", wszPath[512] = L"", wszName[256] = L"";
-        WCHAR *pwszText;
+        WCHAR *pwszText = 0;
 
         if (SUCCEEDED(pPol->lpVtbl->GetColumn(pPol, h, (LPWSTR)L"cn", &col))) {
             if (col.dwADsType == ADSTYPE_CASE_IGNORE_STRING && col.dwNumValues)

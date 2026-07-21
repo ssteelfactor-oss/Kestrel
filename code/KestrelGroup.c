@@ -649,6 +649,37 @@ KestrelTransitiveMembership(
                     colClass.pADsValues[iLast].CaseIgnoreString);
         }
 
+        /* Foreign security principal: a trustee from another domain/forest
+           carried into this privileged group. Cross-domain privilege — and a
+           blind spot when the SID no longer resolves (stale or external-forest).
+           BloodHound-class tools model FSP edges, but the unresolved / external
+           case is easy to miss on a quick review. */
+        if (_wcsicmp(pMember->wszClass, L"foreignSecurityPrincipal") == 0 ||
+            wcsstr(pMember->wszDN, L"CN=ForeignSecurityPrincipals") != NULL) {
+            pMember->bForeign = TRUE;
+            pRes->cForeign++;
+            {
+                PSID         pFsp = NULL;
+                WCHAR        nm[256] = L"", dm[256] = L"";
+                DWORD        cn = ARRAYSIZE(nm), cd = ARRAYSIZE(dm);
+                SID_NAME_USE use;
+                BOOL         bOk = FALSE;
+                if (pMember->wszSid[0] &&
+                    ConvertStringSidToSidW(pMember->wszSid, &pFsp) && pFsp) {
+                    bOk = LookupAccountSidW(NULL, pFsp, nm, &cn, dm, &cd, &use);
+                    LocalFree(pFsp);
+                }
+                if (bOk)
+                    wprintf(L"  [FSP] %s: foreign trustee %s\\%s (%s)\n",
+                            pRes->wszGroupName, dm, nm,
+                            pMember->wszSid[0] ? pMember->wszSid : L"?");
+                else
+                    wprintf(L"  [FSP] %s: foreign trustee %s [UNRESOLVABLE — stale or external-forest SID]\n",
+                            pRes->wszGroupName,
+                            pMember->wszSid[0] ? pMember->wszSid : pMember->wszDN);
+            }
+        }
+
         pMember->bEnabled = TRUE;
         if (bGotUAC && (colUAC.pADsValues[0].Integer & 0x2))
             pMember->bEnabled = FALSE;
@@ -897,6 +928,7 @@ KestrelRunGroupScan(
         *ppTail = pGroup;
         ppTail = &pGroup->pNext;
         pRes->cGroups++;
+        pRes->cForeign += pGroup->cForeign;
     }
 
     /* ── 2b. Named high-value groups without a fixed RID ─────────────── */
@@ -929,11 +961,12 @@ KestrelRunGroupScan(
             *ppTail = pGroup;
             ppTail = &pGroup->pNext;
             pRes->cGroups++;
+            pRes->cForeign += pGroup->cForeign;
         }
     }
 
-    wprintf(L"\n  [*] Groups scanned: %lu  |  Errors: %lu\n",
-        pRes->cGroups, pRes->cErrors);
+    wprintf(L"\n  [*] Groups scanned: %lu  |  Foreign principals: %lu  |  Errors: %lu\n",
+        pRes->cGroups, pRes->cForeign, pRes->cErrors);
 
     /* ── 3. Cross-reference with ACL edges ───────────────────────────── */
     KTRACE(L" Step 3: cross-referencing ACL trustees\n");

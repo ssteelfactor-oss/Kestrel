@@ -536,7 +536,7 @@ static HRESULT _AdcsScanTemplates(_In_ IDirectorySearch *pSearch,
 
         /* ESC4 — template object writable by a broad principal. */
         if (v.bWrite) {
-            WCHAR wszN[320];
+            WCHAR wszN[320] = { 0 };
             f.bESC4 = TRUE; bAnyEsc = TRUE;
             StringCchCopyW(f.wszWriteSid,   ARRAYSIZE(f.wszWriteSid),   v.wszWriteSid);
             StringCchCopyW(f.wszWriteRight, ARRAYSIZE(f.wszWriteRight), v.wszWriteRight);

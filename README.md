@@ -165,11 +165,19 @@ Restricted Groups in each GPO's `GptTmpl.inf` push local-group membership onto e
 **"What ACL misconfigurations is nobody checking?" - delegation & ACL structure (ADeleg-class)**
 
 ```
-Kestrel.exe --acl        # owner ≠ admin · disabled inheritance · non-canonical order · orphaned trustees · low-priv → Tier-0 · OWNER RIGHTS / hidden-object persistence
+Kestrel.exe --acl        # owner ≠ admin · disabled inheritance · non-canonical order · orphaned trustees · low-priv → Tier-0 · OWNER RIGHTS / hidden-object · reanimate-tombstones
 Kestrel.exe --schema     # schema defaultSecurityDescriptor backdoor
 ```
 
 Structural checks that catch what a right-by-right blacklist misses, in the spirit of ADeleg: an object **owned by a non-admin** (a hidden GenericAll), an object with **inheritance disabled** (fallen out of the domain's ACL model), a **non-canonical DACL** (ACEs hand-edited out of order), an **ACE for an orphaned trustee** (unresolvable SID left by a deleted account), and - the flagship - any **low-privilege trustee (Everyone / Authenticated Users / Domain Users) with an edge into a Tier-0 resource**. `--schema` separately parses every class's `defaultSecurityDescriptor` and flags one that grants a dangerous right to a low-priv principal - a backdoor that makes every future object of that class born controllable.
+
+**"Who can quietly own the domain across a trust boundary or the cloud sync?" - cross-domain & hybrid footprint**
+
+```
+Kestrel.exe --adfs       # AD FS DKM key ACL (Golden SAML precondition)
+```
+
+Three checks for privilege that hides at a boundary. **Foreign security principals** in privileged groups (see `--groups`) surface trustees pulled in from another domain/forest. The **Entra Connect / AAD Connect sync account** (`MSOL_` / `AAD_` / `Sync_`) holds DCSync on the domain - de-facto Tier-0 - but has a random RID that the well-known-SID tagging misses, so Kestrel recognises it by name and tags it Tier-0 in the graph, feeding the low-priv → Tier-0 view and pathfinding. `--adfs` audits the **AD FS DKM key**: whoever can read the `thumbnailPhoto` DKM master key under `CN=Microsoft,CN=Program Data` can decrypt the token-signing certificate and forge SAML tokens (Golden SAML), so any non-default read grant is reported. All three read only from AD - no cloud calls.
 
 **"Certificate escalation - and persistence?" - ADCS ESC1-5/9 + backdoors**
 
@@ -207,7 +215,7 @@ SID-filtering gaps on inbound external trusts, TGT delegation across a trust, RC
 Kestrel.exe --groups
 ```
 
-Transitive membership of DA/EA/operators/DnsAdmins + members **added in the last 90 days** (with originating DSA).
+Transitive membership of DA/EA/operators/DnsAdmins + members **added in the last 90 days** (with originating DSA). Foreign security principals (cross-domain / cross-forest trustees) carried into a privileged group are flagged, with unresolvable SIDs called out separately.
 
 **"GPO / policy weaknesses?"**
 
@@ -289,6 +297,7 @@ Kestrel.exe --report C:\out\report.html --opengraph C:\out\kestrel.json
 | `--trust`        | Domain/forest trust posture                                        |
 | `--gmsa`         | gMSA password-reader enumeration                                   |
 | `--adcs`         | ADCS certificate-template / CA audit (ESC1-5/9)                     |
+| `--adfs`         | AD FS DKM key ACL audit (Golden SAML precondition)                 |
 | `--gpp`          | SYSVOL secret sweep - GPP cpassword (MS14-025) + unattend + script creds |
 | `--all`          | Run all modules explicitly                                          |
 | `--report <f>`   | Report file (`.html` / `.json` / `.yaml` by extension)             |
@@ -348,6 +357,8 @@ One LDAP query per group. The DC performs full recursive traversal server-side -
 High-value groups are located by **well-known SID**, not by name - locale-independent. Domain groups (`S-1-5-21-…-RID`): Domain Admins (512), Schema Admins (518), Enterprise Admins (519), Group Policy Creator Owners (520), Read-only Domain Controllers (521), Key Admins (526), Enterprise Key Admins (527). BUILTIN aliases (`S-1-5-32-RID`): Administrators (544), Account/Server/Print/Backup Operators (548–551), Hyper-V Administrators (578). Groups with no fixed RID are resolved by name: **DnsAdmins** (arbitrary DLL load into `dns.exe` as SYSTEM on a DC) and DHCP Administrators.
 
 After expansion, cross-references group membership against ACL edges from v0.2 to surface attack paths: `member → [via group] → EdgeType → target`.
+
+Members that are **foreign security principals** - objects under `CN=ForeignSecurityPrincipals` representing a trustee from another domain or forest - are flagged as `[FSP]` against the privileged group they sit in. Cross-domain privileged membership is easy to overlook, and a foreign SID that no longer resolves (stale, or from an external forest) is called out as `UNRESOLVABLE`, distinguishing it from a legitimate, resolvable cross-domain admin.
 
 **Provenance** (`KestrelProvenance.c`). For each high-value group, Kestrel reads the constructed `msDS-ReplValueMetaData` attribute (per-member replication metadata) and surfaces members **added within the last 90 days** - with the add time and the **originating DSA**. Recently-added privileged members are a classic persistence signal that raw membership does not reveal. The attribute is readable by anyone who can read the object (*not* gated by DS-Replication-Get-Changes / DCSync), is requested per-object (targeted, small footprint), and degrades silently if unavailable. The same primitive also runs single-attribute (`msDS-ReplAttributeMetaData`) provenance on high-value findings - when an object's DACL (`nTSecurityDescriptor`), an RBCD grant, or a shadow-credential key was last written, and from which DSA.
 
@@ -431,6 +442,12 @@ Separately, `--schema` (`KestrelSchemaAudit.c`) reads every `classSchema` object
 
 The same DACL walk also surfaces two stealth-persistence markers. An explicit **OWNER RIGHTS (`S-1-3-4`)** ACE modifies the object owner's *implicit* control: attackers add `OWNER RIGHTS: deny WriteDacl` after planting a backdoor ACE so even the legitimate owner (an admin) can no longer rewrite the DACL to remove it. And a **deny-read ACE for a broad principal** (Everyone / Authenticated Users / Domain Users) that denies read/list rights **hides the object from enumeration** - a hidden user, group, or container holding persistence that SharpHound and ADUC never show. Both are reported per object during `--acl`.
 
+The same scan reads the DACL of the **domain head** for one specific delegation: **DS-Reanimate-Tombstones** (`45ec5156-…`). A non-default holder of this right can resurrect deleted objects - restore-to-persist, or (with the AD Recycle Bin) read the attributes of deleted objects such as a removed computer's LAPS password. BloodHound-class collectors don't model this right or read `CN=Deleted Objects`, so it is a genuine blind spot; domain-head `READ_CONTROL` is available to any authenticated user, so the check stays passive.
+
+### v0.17 Cross-domain & hybrid footprint (`KestrelGroup.c`, `KestrelPath.c`, `KestrelADFS.c`)
+
+Hybrid and multi-domain environments hide Tier-0 privilege at the seams. **Foreign security principals** in privileged groups (above) cover the trust boundary. The **Entra Connect sync account** (`KestrelPath.c`) holds DCSync on the domain but carries a random RID, so the well-known-SID Tier-0 tagging misses it; Kestrel recognises the `MSOL_` / `AAD_` / `Sync_` name Microsoft assigns and tags the node Tier-0, so it becomes a target in the low-priv → Tier-0 view and in pathfinding. `--adfs` (`KestrelADFS.c`) audits the **AD FS DKM master key**: the key lives in the `thumbnailPhoto` attribute of an object under `CN=Microsoft,CN=Program Data`, and anyone able to read it can decrypt the token-signing certificate and forge SAML tokens for any user (Golden SAML). Kestrel reads each DKM object's DACL (DACL-only security mask, no `SeSecurityPrivilege`) and reports every non-default trustee with read access. It is deliberately best-effort: if AD FS is not deployed, or an ordinary user cannot read the container, it reports nothing and returns rather than erroring. All three checks read only from AD - Kestrel stays on-prem and makes no Entra / Graph calls.
+
 ### v0.7 Domain trust posture (`KestrelTrust.c`)
 
 Enumerates `trustedDomain` objects and decodes direction, type, and `trustAttributes`. Flags missing SID filtering on **inbound external** trusts (the classic sIDHistory-injection surface), TGT delegation across a trust, and RC4. Within-forest and forest-transitive trusts are excluded from the SID-filter check - they filter by default, so flagging them would be a false positive. Since v0.10 trusts also feed the graph as domain→domain `Trusts` edges.
@@ -488,7 +505,7 @@ Not a scan but a filter for the ACL module. It builds a baseline of "expected" A
 | v0.14   | ✅      | **ACL depth + lateral edges** — fine-grained dangerous ACEs (`ForceChangePassword` / `WriteSPN` / `AddKeyCredentialLink` / `AddSelf`) · GPO→lateral edges (`AdminTo` / `CanRDP` / `CanPSRemote` / `ExecuteDCOM`) · password-hygiene triad (`PASSWD_NOTREQD` / `DONT_EXPIRE_PASSWORD` / description passwords) |
 | v0.15   | ✅      | **ACL structure audit (ADeleg-class)** — owner ≠ admin · disabled inheritance · non-canonical DACL · orphaned trustees · low-priv → Tier-0 aggregation · schema `defaultSecurityDescriptor` backdoor |
 | v0.16   | ✅      | **Stealth persistence + SYSVOL/ADCS depth** — hidden-object / OWNER RIGHTS (`S-1-3-4`) deny-ACE persistence · unattend.xml + SYSVOL secret sweep · ADCS persistence (template validity + NTAuth store) |
-| v0.17   | 🔲      | **Cross-domain + hybrid footprint** — foreign security principals in privileged groups · Entra Connect (`MSOL_` / `AAD_`) Tier-0 tagging · ADFS DKM key ACL (Golden SAML precondition) |
+| v0.17   | ✅      | **Cross-domain + hybrid footprint** — foreign security principals in privileged groups · Entra Connect (`MSOL_` / `AAD_`) Tier-0 tagging · ADFS DKM key ACL (Golden SAML precondition) |
 | v0.18   | 🔲      | **Query hygiene + honest footprint** — minimal `SDflags` / security-mask · attribute-list & filter-indexability audit · "Detection footprint" documentation (how each scan appears in event 1644) |
 | v1.0    | 🔲      | Feature-complete for the on-prem, directory-side posture mission |
 | post-1.0 | 🔲     | ADExplorer `.dat` snapshot as an offline input source (optional; touches the data-source layer) |

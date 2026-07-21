@@ -114,7 +114,7 @@ _HygieneAceSid(_In_ ACE_HEADER *pAce)
                - !!(p->Flags & ACE_INHERITED_OBJECT_TYPE_PRESENT)) * sizeof(GUID));
     }
     default:
-        return NULL;
+        return 0;
     }
 }
 
@@ -156,7 +156,7 @@ _CheckDaclHygiene(_In_ PACL pDacl, _In_z_ LPCWSTR pwszDN)
     for (i = 0; i < pDacl->AceCount; i++) {
         ACE_HEADER *pAce = NULL;
         BOOL bAllow, bInherited;
-        int  rank;
+        int  rank = 0;
 
         if (!GetAce(pDacl, i, (LPVOID *)&pAce) || !pAce) continue;
 
@@ -193,7 +193,7 @@ _CheckDaclHygiene(_In_ PACL pDacl, _In_z_ LPCWSTR pwszDN)
                                pAce->AceType == ACCESS_DENIED_OBJECT_ACE_TYPE);
             DWORD  dwMask   = ((ACCESS_ALLOWED_ACE *)pAce)->Mask; /* Mask offset is common */
             PSID   pSid     = _HygieneAceSid(pAce);
-            LPWSTR s        = NULL;
+            LPWSTR s        = 0;
 
             if (pSid && IsValidSid(pSid) && ConvertSidToStringSidW(pSid, &s) && s) {
                 /* OWNER RIGHTS (S-1-3-4): explicit ACE modifies the owner's
@@ -451,7 +451,7 @@ KestrelBuildExtendedRightsTable(
     }
 
     /* ── 2. Set preferences: ONELEVEL scope, paged ───────────────────── */
-    ADS_SEARCHPREF_INFO prefs[2];
+    ADS_SEARCHPREF_INFO prefs[2] = { 0 };
 
     prefs[0].dwSearchPref = ADS_SEARCHPREF_SEARCH_SCOPE;
     prefs[0].vValue.dwType = ADSTYPE_INTEGER;
@@ -838,6 +838,91 @@ Cleanup:
   * for all remaining objects (including the one that triggered the switch).
   */
 
+/* DS-Reanimate-Tombstones control-access right (restore of deleted objects). */
+#define GUID_REANIMATE_TOMBSTONES  L"{45ec5156-db7e-47bb-b53f-dbeb2d03c40f}"
+
+/* Default/privileged holders of Reanimate-Tombstones we do NOT flag. */
+static BOOL
+_ReanimateDefaultHolder(_In_z_ LPCWSTR sid)
+{
+    LPCWSTR r;
+    if (_wcsicmp(sid, L"S-1-5-18")     == 0) return TRUE;  /* SYSTEM         */
+    if (_wcsicmp(sid, L"S-1-5-32-544") == 0) return TRUE;  /* Administrators */
+    if (_wcsicmp(sid, L"S-1-5-9")      == 0) return TRUE;  /* Enterprise DCs */
+    r = wcsrchr(sid, L'-');
+    if (r) {
+        r++;
+        if (!wcscmp(r, L"512") || !wcscmp(r, L"519") ||    /* Domain / Enterprise Admins */
+            !wcscmp(r, L"518") || !wcscmp(r, L"516"))      /* Schema Admins / Domain Controllers */
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* Delegation check: who holds DS-Reanimate-Tombstones on the domain head. A
+ * non-default grantee can resurrect deleted objects — restore-to-persist, or
+ * (with the AD Recycle Bin) read the attributes of deleted objects such as a
+ * removed computer's LAPS password. BloodHound-class collectors don't model
+ * this right or read CN=Deleted Objects, so it is a blind spot. Domain-head
+ * READ_CONTROL is available to any authenticated user — passive, read-only. */
+static VOID
+_CheckReanimateRights(_In_z_ LPCWSTR pwszDomainNC)
+{
+    WCHAR                wszPath[600];
+    IDirectoryObject    *pDirObj  = NULL;
+    PSECURITY_DESCRIPTOR pSD      = NULL;
+    DWORD                cbSD     = 0;
+    PACL                 pDacl    = NULL;
+    BOOL                 bPresent = FALSE, bDefault = FALSE;
+    WORD                 i;
+
+    if (FAILED(StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszDomainNC)))
+        return;
+    if (FAILED(ADsGetObject(wszPath, &IID_IDirectoryObject, (void **)&pDirObj)))
+        return;
+
+    if (SUCCEEDED(KestrelGetObjectSecurityDescriptor(pDirObj, &pSD, &cbSD)) && pSD &&
+        GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDefault) && bPresent && pDacl) {
+
+        for (i = 0; i < pDacl->AceCount; i++) {
+            ACE_HEADER                *pAce = NULL;
+            ACCESS_ALLOWED_OBJECT_ACE *pObj;
+            WCHAR                      wszGuid[64];
+            PSID                       pSid;
+            LPWSTR                     s = NULL;
+
+            if (!GetAce(pDacl, i, (LPVOID *)&pAce) || !pAce) continue;
+            if (pAce->AceType != ACCESS_ALLOWED_OBJECT_ACE_TYPE) continue;
+
+            pObj = (ACCESS_ALLOWED_OBJECT_ACE *)pAce;
+            if (!(pObj->Mask & ADS_RIGHT_DS_CONTROL_ACCESS)) continue;
+            if (!(pObj->Flags & ACE_OBJECT_TYPE_PRESENT))    continue; /* bare CR = all rights, flagged elsewhere */
+
+            KestrelGuidToString(&pObj->ObjectType, wszGuid, ARRAYSIZE(wszGuid));
+            if (_wcsicmp(wszGuid, GUID_REANIMATE_TOMBSTONES) != 0) continue;
+
+            pSid = _HygieneAceSid(pAce);
+            if (!pSid || !IsValidSid(pSid) || !ConvertSidToStringSidW(pSid, &s) || !s) continue;
+
+            if (!_ReanimateDefaultHolder(s)) {
+                WCHAR        name[256] = L"", dom[256] = L"";
+                DWORD        cn = ARRAYSIZE(name), cd = ARRAYSIZE(dom);
+                SID_NAME_USE use;
+                if (LookupAccountSidW(NULL, pSid, name, &cn, dom, &cd, &use))
+                    wprintf(L"  [REANIMATE] %s\\%s (%s) — DS-Reanimate-Tombstones on domain head "
+                            L"(can resurrect deleted objects)\n", dom, name, s);
+                else
+                    wprintf(L"  [REANIMATE] %s — DS-Reanimate-Tombstones on domain head "
+                            L"(can resurrect deleted objects)\n", s);
+            }
+            LocalFree(s);
+        }
+    }
+
+    if (pSD)     HeapFree(GetProcessHeap(), 0, pSD);
+    if (pDirObj) pDirObj->lpVtbl->Release(pDirObj);
+}
+
 _Must_inspect_result_
 HRESULT
 KestrelScanACLEdges(
@@ -1115,6 +1200,9 @@ KestrelScanACLEdges(
             pwszRight,
             pE->bDeny ? L" [DENY]" : L"");
     }
+
+    /* delegation check on the domain head: reanimate-tombstones holders */
+    _CheckReanimateRights(pwszDomainNC);
 
     wprintf(L"\n  [*] Mode: %s\n", bUsePlanB ? L"Plan B (LDAP column)" : L"Plan A (per-object bind)");
     wprintf(L"  [*] Objects scanned: %lu  |  Delegations: %lu  |  Default ACEs suppressed: %lu  |  Errors: %lu\n",
