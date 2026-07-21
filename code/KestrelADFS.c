@@ -148,8 +148,11 @@ KestrelRunADFSDkmScan(_In_z_ LPCWSTR pwszDomainNC)
     prefs[2].vValue.Integer = KESTREL_LDAP_PAGESIZE;
     pS->lpVtbl->SetSearchPreference(pS, prefs, ARRAYSIZE(prefs));
 
-    /* The DKM master key lives in thumbnailPhoto on the key object(s). */
-    hr = pS->lpVtbl->ExecuteSearch(pS, (LPWSTR)L"(thumbnailPhoto=*)",
+    /* The DKM master key lives in thumbnailPhoto on the AD FS contact object.
+       Leading with the indexed objectClass=contact clause lets the DC filter on
+       the index first, so the non-indexed thumbnailPhoto presence test runs on a
+       handful of objects instead of the whole subtree (avoids event 1644). */
+    hr = pS->lpVtbl->ExecuteSearch(pS, (LPWSTR)L"(&(objectClass=contact)(thumbnailPhoto=*))",
             rgAttrs, ARRAYSIZE(rgAttrs), &h);
     if (FAILED(hr)) {
         wprintf(L"  [=] Container present but not searchable as this user (skipping)\n");

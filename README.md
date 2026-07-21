@@ -47,6 +47,8 @@ Two honest caveats:
 
 Kestrel does not fragment queries, randomize timing, or hide. It looks normal because it does normal things - that is the design, and its honest limit.
 
+Because that is the design, the trace is documented rather than hidden: **[FOOTPRINT.md](FOOTPRINT.md)** catalogues, per scan, the exact LDAP filter / scope / SYSVOL reads and the DC events each one generates (1644 / 4662 / 4661 / 5145) — and, just as importantly, the modification events Kestrel can **never** produce, because it only ever reads. It also explains why reading *who can* DCSync is not DCSync, and how a blue team can tell an audit run from an attacker.
+
 ## Requirements
 
 - Windows, domain-joined machine
@@ -506,7 +508,7 @@ Not a scan but a filter for the ACL module. It builds a baseline of "expected" A
 | v0.15   | ✅      | **ACL structure audit (ADeleg-class)** — owner ≠ admin · disabled inheritance · non-canonical DACL · orphaned trustees · low-priv → Tier-0 aggregation · schema `defaultSecurityDescriptor` backdoor |
 | v0.16   | ✅      | **Stealth persistence + SYSVOL/ADCS depth** — hidden-object / OWNER RIGHTS (`S-1-3-4`) deny-ACE persistence · unattend.xml + SYSVOL secret sweep · ADCS persistence (template validity + NTAuth store) |
 | v0.17   | ✅      | **Cross-domain + hybrid footprint** — foreign security principals in privileged groups · Entra Connect (`MSOL_` / `AAD_`) Tier-0 tagging · ADFS DKM key ACL (Golden SAML precondition) |
-| v0.18   | 🔲      | **Query hygiene + honest footprint** — minimal `SDflags` / security-mask · attribute-list & filter-indexability audit · "Detection footprint" documentation (how each scan appears in event 1644) |
+| v0.18   | ✅      | **Query hygiene + honest footprint** — minimal `SDflags` / security-mask · attribute-list & filter-indexability audit · [detection-footprint documentation](FOOTPRINT.md) |
 | v1.0    | 🔲      | Feature-complete for the on-prem, directory-side posture mission |
 | post-1.0 | 🔲     | ADExplorer `.dat` snapshot as an offline input source (optional; touches the data-source layer) |
 

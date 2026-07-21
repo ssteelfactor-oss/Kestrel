@@ -69,9 +69,9 @@ static LPWSTR g_rgszRightAttrs[] = {
 static BOOL
 _IsAdminOwner(_In_ PSID pSid)
 {
-    LPWSTR  s = NULL;
+    LPWSTR  s = 0;
     BOOL    bAdmin = FALSE;
-    LPCWSTR rid;
+    LPCWSTR rid = 0;
 
     if (!pSid || !IsValidSid(pSid)) return TRUE;      /* unknown → don't flag */
     if (!ConvertSidToStringSidW(pSid, &s) || !s) return TRUE;
@@ -154,7 +154,7 @@ _CheckDaclHygiene(_In_ PACL pDacl, _In_z_ LPCWSTR pwszDN)
     if (!pDacl) return;
 
     for (i = 0; i < pDacl->AceCount; i++) {
-        ACE_HEADER *pAce = NULL;
+        ACE_HEADER *pAce = 0;
         BOOL bAllow, bInherited;
         int  rank = 0;
 
@@ -176,9 +176,9 @@ _CheckDaclHygiene(_In_ PACL pDacl, _In_z_ LPCWSTR pwszDN)
             if (pSid && IsValidSid(pSid) && ConvertSidToStringSidW(pSid, &s) && s) {
                 LPCWSTR rid = wcsrchr(s, L'-');
                 if (_wcsnicmp(s, L"S-1-5-21-", 9) == 0 && rid && wcslen(rid + 1) >= 4) {
-                    WCHAR       name[256], dom[256];
+                    WCHAR       name[256] = { 0 }, dom[256] = { 0 };
                     DWORD       cn = ARRAYSIZE(name), cd = ARRAYSIZE(dom);
-                    SID_NAME_USE use;
+                    SID_NAME_USE use = { 0 };
                     if (!LookupAccountSidW(NULL, pSid, name, &cn, dom, &cd, &use) &&
                         GetLastError() == ERROR_NONE_MAPPED)
                         wprintf(L"  [ORPHAN-SID] %s — ACE for unresolvable trustee %s\n", pwszDN, s);
@@ -429,11 +429,11 @@ KestrelBuildExtendedRightsTable(
     KESTREL_EXTENDED_RIGHT** ppRightsHead)
 {
     HRESULT                  hr = S_OK;
-    IDirectorySearch* pSearch = NULL;
-    ADS_SEARCH_HANDLE        hSearch = NULL;
-    KESTREL_EXTENDED_RIGHT* pHead = NULL;
+    IDirectorySearch* pSearch = 0;
+    ADS_SEARCH_HANDLE        hSearch = 0;
+    KESTREL_EXTENDED_RIGHT* pHead = 0;
     KESTREL_EXTENDED_RIGHT** ppTail = &pHead; /* build list in order */
-    WCHAR                    wszPath[512];
+    WCHAR                    wszPath[512] = { 0 };
     DWORD                    cTotal = 0;
 
     if (!pwszConfigNC || !ppRightsHead) return E_INVALIDARG;
@@ -606,12 +606,12 @@ KestrelGetObjectSecurityDescriptor(
     _Out_       DWORD* pcbSD)
 {
     HRESULT         hr = S_OK;
-    ADS_ATTR_INFO* pAttrInfo = NULL;
+    ADS_ATTR_INFO* pAttrInfo = 0;
     DWORD           cAttrs = 0;
-    PSECURITY_DESCRIPTOR pSdCopy = NULL;
+    PSECURITY_DESCRIPTOR pSdCopy = 0;
 
     if (!pDirObj || !ppSD || !pcbSD) return E_INVALIDARG;
-    *ppSD = NULL;
+    *ppSD = 0;
     *pcbSD = 0;
 
     LPWSTR rgszAttrs[] = { L"nTSecurityDescriptor" };
@@ -629,7 +629,7 @@ KestrelGetObjectSecurityDescriptor(
     }
 
     /* ── 2. Locate the nTSecurityDescriptor attribute ─────────────────── */
-    ADS_ATTR_INFO* pSD_Attr = NULL;
+    ADS_ATTR_INFO* pSD_Attr = 0;
 
     for (DWORD i = 0; i < cAttrs; i++) {
         if (_wcsicmp(pAttrInfo[i].pszAttrName, L"nTSecurityDescriptor") == 0) {
@@ -665,14 +665,14 @@ KestrelGetObjectSecurityDescriptor(
     /* ── 5. Quick sanity check before handing off ─────────────────────── */
     if (!IsValidSecurityDescriptor(pSdCopy)) {
         HeapFree(GetProcessHeap(), 0, pSdCopy);
-        pSdCopy = NULL;
+        pSdCopy = 0;
         hr = E_UNEXPECTED;
         goto Cleanup;
     }
 
     *ppSD = pSdCopy;
     *pcbSD = pProvSpec->dwLength;
-    pSdCopy = NULL;  /* ownership transferred */
+    pSdCopy = 0;  /* ownership transferred */
 
 Cleanup:
     /* pAttrInfo allocated by ADSI — must use FreeADsMem, not HeapFree */
@@ -702,7 +702,7 @@ KestrelWalkDacl(
         return HRESULT_FROM_WIN32(GetLastError());
 
     for (DWORD i = 0; i < aclInfo.AceCount; i++) {
-        LPVOID pAce = NULL;
+        LPVOID pAce = 0;
         if (!GetAce(pDacl, i, &pAce)) continue;
 
         ACE_HEADER* pHeader = (ACE_HEADER*)pAce;
@@ -715,8 +715,8 @@ KestrelWalkDacl(
             continue;
 
         DWORD  dwMask = 0;
-        PSID   pTrusteeSid = NULL;
-        GUID* pObjectType = NULL;
+        PSID   pTrusteeSid = 0;
+        GUID* pObjectType = 0;
 
         switch (pHeader->AceType) {
         case ACCESS_ALLOWED_ACE_TYPE:
@@ -868,13 +868,13 @@ _ReanimateDefaultHolder(_In_z_ LPCWSTR sid)
 static VOID
 _CheckReanimateRights(_In_z_ LPCWSTR pwszDomainNC)
 {
-    WCHAR                wszPath[600];
-    IDirectoryObject    *pDirObj  = NULL;
-    PSECURITY_DESCRIPTOR pSD      = NULL;
+    WCHAR                wszPath[600] = { 0 };
+    IDirectoryObject    *pDirObj  = 0;
+    PSECURITY_DESCRIPTOR pSD      = 0;
     DWORD                cbSD     = 0;
-    PACL                 pDacl    = NULL;
+    PACL                 pDacl    = 0;
     BOOL                 bPresent = FALSE, bDefault = FALSE;
-    WORD                 i;
+    WORD                 i = 0;
 
     if (FAILED(StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszDomainNC)))
         return;
@@ -885,11 +885,11 @@ _CheckReanimateRights(_In_z_ LPCWSTR pwszDomainNC)
         GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDefault) && bPresent && pDacl) {
 
         for (i = 0; i < pDacl->AceCount; i++) {
-            ACE_HEADER                *pAce = NULL;
+            ACE_HEADER                *pAce = 0;
             ACCESS_ALLOWED_OBJECT_ACE *pObj;
-            WCHAR                      wszGuid[64];
-            PSID                       pSid;
-            LPWSTR                     s = NULL;
+            WCHAR                      wszGuid[64] = { 0 };
+            PSID                       pSid = 0;
+            LPWSTR                     s = 0;
 
             if (!GetAce(pDacl, i, (LPVOID *)&pAce) || !pAce) continue;
             if (pAce->AceType != ACCESS_ALLOWED_OBJECT_ACE_TYPE) continue;
@@ -935,8 +935,8 @@ KestrelScanACLEdges(
     KESTREL_ACL_SCAN_RESULT* pResult = 0;
     IDirectorySearch* pSearch = 0;
     ADS_SEARCH_HANDLE        hSearch = 0;
-    WCHAR                    wszPath[512];
-    WCHAR                    wszConfigNC[512];
+    WCHAR                    wszPath[512] = { 0 };
+    WCHAR                    wszConfigNC[512] = { 0 } ;
     BOOL                     bUsePlanB = FALSE;
     KESTREL_ACL_BASELINE*    pBaseline = 0;
 
@@ -1001,7 +1001,7 @@ KestrelScanACLEdges(
 
     prefs[2].dwSearchPref = ADS_SEARCHPREF_SECURITY_MASK;
     prefs[2].vValue.dwType = ADSTYPE_INTEGER;
-    prefs[2].vValue.Integer = 0x4; /* DACL_SECURITY_INFORMATION only —
+    prefs[2].vValue.Integer = ADS_SECURITY_INFO_DACL; /* DACL_SECURITY_INFORMATION only —
                                       readable by any authenticated user */
 
     hr = pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 3);
@@ -1076,7 +1076,7 @@ KestrelScanACLEdges(
         }
 
         /* ── Obtain SECURITY_DESCRIPTOR ──────────────────────────────── */
-        PSECURITY_DESCRIPTOR pSD = NULL;
+        PSECURITY_DESCRIPTOR pSD = 0;
         BOOL                 bOwnsSD = FALSE; /* TRUE = HeapAlloc, must HeapFree
                                                  FALSE = ADSI owns, FreeColumn */
 
@@ -1129,7 +1129,7 @@ KestrelScanACLEdges(
 
         /* ── Walk DACL ────────────────────────────────────────────────── */
         if (pSD && IsValidSecurityDescriptor(pSD)) {
-            PACL pDacl = NULL;
+            PACL pDacl = 0;
             BOOL bPresent = FALSE;
             BOOL bDefault = FALSE;
 
@@ -1137,7 +1137,7 @@ KestrelScanACLEdges(
             {
                 SECURITY_DESCRIPTOR_CONTROL sdCtrl = 0;
                 DWORD dwSdRev = 0;
-                PSID  pOwner  = NULL;
+                PSID  pOwner  = 0;
                 BOOL  bOwnerDef = FALSE;
 
                 if (GetSecurityDescriptorControl(pSD, &sdCtrl, &dwSdRev) &&
@@ -1146,7 +1146,7 @@ KestrelScanACLEdges(
 
                 if (GetSecurityDescriptorOwner(pSD, &pOwner, &bOwnerDef) &&
                     pOwner && !_IsAdminOwner(pOwner)) {
-                    LPWSTR so = NULL;
+                    LPWSTR so = 0;
                     if (ConvertSidToStringSidW(pOwner, &so) && so) {
                         wprintf(L"  [OWNER] %s — owned by non-admin %s\n", wszDN, so);
                         LocalFree(so);
@@ -1457,8 +1457,8 @@ static BOOL _ReadDomainSid(_In_z_ LPCWSTR pwszDomainNC,
     HRESULT             hr;
     IDirectorySearch   *pSearch = 0;
     ADS_SEARCH_HANDLE   hSearch = 0;
-    WCHAR               wszPath[512];
-    ADS_SEARCHPREF_INFO prefs[1];
+    WCHAR               wszPath[512] = { 0 } ;
+    ADS_SEARCHPREF_INFO prefs[1] = { 0 };
     LPWSTR              attrs[] = { (LPWSTR)L"objectSid" };
     BOOL                bOk = FALSE;
 
@@ -1511,7 +1511,7 @@ KestrelEmitRbcdFromSd(
     _In_z_   LPCWSTR                    pwszLocalDomainSid,
     _Inout_  KESTREL_DELEG_SCAN_RESULT *pResult)
 {
-    PACL pDacl = NULL;
+    PACL pDacl = 0;
     BOOL bPresent = FALSE, bDefault = FALSE;
 
     if (!IsValidSecurityDescriptor(pSD))                                 return S_OK;
@@ -1523,12 +1523,12 @@ KestrelEmitRbcdFromSd(
         return S_OK;
 
     for (DWORD i = 0; i < aclInfo.AceCount; i++) {
-        LPVOID pAce = NULL;
+        LPVOID pAce = 0;
         if (!GetAce(pDacl, i, &pAce)) continue;
 
         DWORD  dwMask   = 0;
-        PSID   pSid     = NULL;
-        GUID  *pObjType = NULL;
+        PSID   pSid     = 0;
+        GUID  *pObjType = 0;
         BOOL   bDeny    = FALSE;
 
         if (!KestrelAceDecode(pAce, &dwMask, &pSid, &pObjType, &bDeny)) continue;
@@ -1576,10 +1576,10 @@ KestrelScanDelegation(
     _Outptr_ KESTREL_DELEG_SCAN_RESULT **ppResult)
 {
     HRESULT                    hr      = S_OK;
-    IDirectorySearch          *pSearch = NULL;
-    ADS_SEARCH_HANDLE          hSearch = NULL;
-    KESTREL_DELEG_SCAN_RESULT *pResult = NULL;
-    WCHAR                      wszPath[512];
+    IDirectorySearch          *pSearch = 0;
+    ADS_SEARCH_HANDLE          hSearch = 0;
+    KESTREL_DELEG_SCAN_RESULT *pResult = 0;
+    WCHAR                      wszPath[512] = { 0 };
     WCHAR                      wszDomainSid[64] = L"";
 
     if (!pwszDomainNC || !ppResult) return E_INVALIDARG;
@@ -1781,7 +1781,7 @@ KestrelScanDelegation(
         pResult->cObjectsScanned, pResult->cFindings, pResult->cObjectsErrored);
 
     *ppResult = pResult;
-    pResult   = NULL;
+    pResult   = 0;
 
 Cleanup:
     if (hSearch && pSearch)
@@ -1857,10 +1857,10 @@ KestrelResolveSchemaGuid(
     _Out_  BOOL   *pbFound)
 {
     HRESULT           hr      = S_OK;
-    IDirectorySearch *pSearch = NULL;
-    ADS_SEARCH_HANDLE hSearch = NULL;
-    WCHAR             wszPath[600];
-    WCHAR             wszFilter[256];
+    IDirectorySearch *pSearch = 0;
+    ADS_SEARCH_HANDLE hSearch = 0;
+    WCHAR             wszPath[600] = { 0 };
+    WCHAR             wszFilter[256] = { 0 } ;
     LPWSTR            attrs[] = { L"schemaIDGUID" };
 
     ZeroMemory(pGuid, sizeof(*pGuid));
@@ -1943,7 +1943,7 @@ KestrelEmitLapsReadersFromSd(
     _In_      DWORD                       cAttrs,
     _Inout_   KESTREL_LAPS_SCAN_RESULT   *pResult)
 {
-    PACL pDacl = NULL;
+    PACL pDacl = 0;
     BOOL bPresent = FALSE, bDefault = FALSE;
 
     if (!IsValidSecurityDescriptor(pSD))                               return S_OK;
@@ -1955,12 +1955,12 @@ KestrelEmitLapsReadersFromSd(
         return S_OK;
 
     for (DWORD i = 0; i < aclInfo.AceCount; i++) {
-        LPVOID pAce = NULL;
+        LPVOID pAce = 0;
         if (!GetAce(pDacl, i, &pAce)) continue;
 
         DWORD  dwMask   = 0;
-        PSID   pSid     = NULL;
-        GUID  *pObjType = NULL;
+        PSID   pSid     = 0;
+        GUID  *pObjType = 0;
         BOOL   bDeny    = FALSE;
 
         if (!KestrelAceDecode(pAce, &dwMask, &pSid, &pObjType, &bDeny)) continue;
@@ -1997,7 +1997,7 @@ KestrelEmitLapsReadersFromSd(
 
         if (!bGrants) continue;
 
-        LPWSTR pwszSidStr = NULL;
+        LPWSTR pwszSidStr = 0;
         if (!ConvertSidToStringSidW(pSid, &pwszSidStr) || !pwszSidStr)
             continue;
 
@@ -2028,12 +2028,12 @@ KestrelScanLapsReaders(
     _Outptr_ KESTREL_LAPS_SCAN_RESULT **ppResult)
 {
     HRESULT                   hr      = S_OK;
-    IDirectorySearch         *pSearch = NULL;
-    ADS_SEARCH_HANDLE         hSearch = NULL;
-    KESTREL_LAPS_SCAN_RESULT *pResult = NULL;
-    WCHAR                     wszConfigNC[512];
-    WCHAR                     wszSchemaNC[600];
-    WCHAR                     wszPath[512];
+    IDirectorySearch         *pSearch = 0;
+    ADS_SEARCH_HANDLE         hSearch = 0;
+    KESTREL_LAPS_SCAN_RESULT *pResult = 0;
+    WCHAR                     wszConfigNC[512] = { 0 };
+    WCHAR                     wszSchemaNC[600] = { 0 };
+    WCHAR                     wszPath[512] = { 0 };
 
     KESTREL_LAPS_ATTR rgAttrs[KESTREL_LAPS_MAX_ATTRS] = { 0 };
     DWORD             cAttrs = 0;
@@ -2092,7 +2092,7 @@ KestrelScanLapsReaders(
     if (cAttrs == 0) {
         wprintf(L"  [*] No LAPS attributes present in schema — nothing to enumerate.\n");
         *ppResult = pResult;
-        pResult   = NULL;
+        pResult   = 0;
         goto Cleanup;   /* S_OK with an empty, informative result */
     }
 
@@ -2106,7 +2106,7 @@ KestrelScanLapsReaders(
         goto Cleanup;
     }
 
-    ADS_SEARCHPREF_INFO prefs[3];
+    ADS_SEARCHPREF_INFO prefs[3] = { 0 };
     prefs[0].dwSearchPref  = ADS_SEARCHPREF_SEARCH_SCOPE;
     prefs[0].vValue.dwType = ADSTYPE_INTEGER;
     prefs[0].vValue.Integer = ADS_SCOPE_SUBTREE;
@@ -2115,7 +2115,7 @@ KestrelScanLapsReaders(
     prefs[1].vValue.Integer = KESTREL_LDAP_PAGESIZE;
     prefs[2].dwSearchPref  = ADS_SEARCHPREF_SECURITY_MASK;
     prefs[2].vValue.dwType = ADSTYPE_INTEGER;
-    prefs[2].vValue.Integer = 0x4;   /* DACL_SECURITY_INFORMATION — domain-user readable */
+    prefs[2].vValue.Integer = ADS_SECURITY_INFO_DACL;   /* DACL_SECURITY_INFORMATION — domain-user readable */
 
     hr = pSearch->lpVtbl->SetSearchPreference(pSearch, prefs, 3);
     if (FAILED(hr)) goto Cleanup;
