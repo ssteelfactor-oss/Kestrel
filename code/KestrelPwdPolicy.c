@@ -15,7 +15,7 @@
  *      still forges valid Golden Tickets, and signals the domain never went
  *      through compromise recovery.
  *   4. ms-DS-MachineAccountQuota > 0: any authenticated user can join machine
- *      accounts — the enabler for noPac (CVE-2021-42278/42287) and Certifried
+ *      accounts — the enabler for noPac (CVE-2021-42278/42287), Certifried
  *      (CVE-2022-26923).
  *
  * All of it is a read on the domain object, one container enumeration, and a
@@ -115,7 +115,7 @@ _ReportDefaultPolicy(_In_ IDirectorySearch *pS, _In_ ADS_SEARCH_HANDLE h)
         if (maxDays < 0)
             wprintf(L"      [NOTE] domain passwords never expire (maxPwdAge)\n");
         if (lMAQ > 0)
-            wprintf(L"      [noPac/Certifried] ms-DS-MachineAccountQuota=%ld — any user can join machine accounts (CVE-2021-42278/42287, CVE-2022-26923)\n", lMAQ);
+            wprintf(L"      [noPac/Certifried/Certighost] ms-DS-MachineAccountQuota=%ld — any user can join machine accounts (CVE-2021-42278/42287, CVE-2022-26923, CVE-2026-54121) — see --machines for accounts already created\n", lMAQ);
     }
 }
 

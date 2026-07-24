@@ -532,3 +532,9 @@ Parent project: [NetEnum](https://github.com/ssteelfactor-oss/NetEnum) - AD enum
 
 [@ssteelfactor-oss](https://github.com/ssteelfactor-oss)
 Security research and COM/Windows internals
+
+## License
+
+Licensed under the **Apache License, Version 2.0** - see [LICENSE](LICENSE).
+
+Kestrel is a defensive auditing tool: read-only, ordinary domain-user rights, no evasion, and its trace on a domain controller is documented in [FOOTPRINT.md](FOOTPRINT.md). It is provided "as is", without warranties or conditions of any kind - run it against directories you are authorised to audit.

@@ -20,6 +20,7 @@
  *   --gmsa         gMSA password reader enumeration
  *   --adcs         ADCS certificate-template / CA audit (ESC1-5/9)
  *   --adfs         AD FS DKM key ACL audit (Golden SAML precondition)
+ *   --machines     Machine accounts created via MachineAccountQuota (mS-DS-CreatorSID)
  *   --gpp          SYSVOL secret sweep — GPP cpassword + unattend + script creds
  *
  * Output:
@@ -79,6 +80,7 @@ KestrelPrintHelp(VOID)
         L"  --gmsa         gMSA password reader enumeration\n"
         L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
         L"  --adfs         AD FS DKM key ACL audit (Golden SAML precondition)\n"
+        L"  --machines     Machine accounts created via MachineAccountQuota (mS-DS-CreatorSID)\n"
         L"  --gpp          SYSVOL secret sweep (GPP cpassword + unattend + script creds)\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n"
@@ -126,6 +128,7 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunGMSA       = TRUE;
     pCfg->bRunADCS       = TRUE;
     pCfg->bRunADFS       = TRUE;
+    pCfg->bRunMachineAcct = TRUE;
     pCfg->bRunGPP        = TRUE;
 }
 
@@ -319,6 +322,11 @@ KestrelParseArgs(
         }
         if (_wcsicmp(arg, L"--adfs") == 0) {
             pCfg->bRunADFS = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--machines") == 0) {
+            pCfg->bRunMachineAcct = TRUE;
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -589,6 +597,14 @@ int wmain(int argc, wchar_t *argv[])
         hr = KestrelRunADFSDkmScan(wszDomainNC);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunADFSDkmScan failed: 0x%08X\n", hr);
+    }
+
+    /* ── machine accounts created through MachineAccountQuota ────── */
+    if (cfg.bRunMachineAcct) {
+        wprintf(L"\n═══ Kestrel — Machine Accounts (quota footprint) ═══\n");
+        hr = KestrelRunMachineAcctScan(wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunMachineAcctScan failed: 0x%08X\n", hr);
     }
 
     /* ── v0.7: gMSA password reader enumeration ──────────────────── */

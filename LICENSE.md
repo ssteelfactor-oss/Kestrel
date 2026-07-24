@@ -186,7 +186,11 @@
       same "printed page" as the copyright notice for easier
       identification within third-party archives.
 
+<<<<<<< HEAD
    Copyright [2026] [Aleksey Pstukhov (ssteelfactor-oss)]
+=======
+   Copyright 2026 ssteelfactor-oss
+>>>>>>> ff784e4 (update 24.07.2026 19:26:27,72)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.

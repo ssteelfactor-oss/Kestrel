@@ -51,6 +51,9 @@
     <ClCompile Include="code\KestrelADFS.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="code\KestrelMachineAcct.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
     <ClCompile Include="code\KestrelGPP.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
