@@ -211,7 +211,8 @@ _CheckDaclHygiene(_In_ PACL pDacl, _In_z_ LPCWSTR pwszDN)
                     wprintf(L"  [HIDDEN] %s — deny-read ACE for %s (object hidden from enumeration)\n",
                             pwszDN, s);
                     KestrelAddFinding(KESTREL_SEV_HIGH, L"Persistence", pwszDN,
-                        L"object hidden from enumeration via a broad deny-read ACE");
+                        L"object hidden from enumeration via a broad deny-read ACE",
+                    L"inspect the hidden object and remove the broad deny-read ACE (dsacls)");
                 }
 
                 LocalFree(s);
@@ -921,7 +922,8 @@ _CheckReanimateRights(_In_z_ LPCWSTR pwszDomainNC)
                     wprintf(L"  [REANIMATE] %s — DS-Reanimate-Tombstones on domain head "
                             L"(can resurrect deleted objects)\n", s);
                 KestrelAddFinding(KESTREL_SEV_HIGH, L"Delegation", pwszDomainNC,
-                    L"non-default principal can reanimate tombstones (restore-to-persist)");
+                    L"non-default principal can reanimate tombstones (restore-to-persist)",
+                    L"remove Reanimate-Tombstones from the non-default principal on the domain head (dsacls)");
             }
             LocalFree(s);
         }
@@ -2416,7 +2418,8 @@ DWORD KestrelAnalyzeDCSync(
 
         if (!bExpected && (entries[i].dwRights & DCSYNC_RIGHT_CHANGES_ALL))
             KestrelAddFinding(KESTREL_SEV_CRITICAL, L"DCSync", entries[i].wszSid,
-                L"non-default principal can replicate directory changes (DCSync)");
+                L"non-default principal can replicate directory changes (DCSync)",
+                    L"remove GetChanges/GetChangesAll from the principal on the domain head (dsacls) unless it is a DC");
     }
 
     if (cCritical > 0) {

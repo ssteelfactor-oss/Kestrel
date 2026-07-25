@@ -200,7 +200,8 @@ KestrelRunMachineAcctScan(_In_z_ LPCWSTR pwszDomainNC)
                 L"Machine Acct", wszSam[0] ? wszSam : wszCreator,
                 bIsDC ? L"created via quota and claims to be a Domain Controller"
                       : (cSpn && bEnabled) ? L"created via quota, enabled, with SPNs"
-                                           : L"created via quota by a non-admin");
+                                           : L"created via quota by a non-admin",
+                L"set ms-DS-MachineAccountQuota to 0 and delegate machine creation to specific admins");
 
         /* When did the identity attributes last change, and from which DSA?
            dNSHostName / SPN rewrites are the Certifried-class manipulation. */

@@ -374,7 +374,8 @@ _RoastPrintSection(
             KestrelAddFinding(KESTREL_SEV_HIGH, bKerb ? L"Kerberoast" : L"AS-REP",
                 pF->wszSAM,
                 bKerb ? L"high-risk Kerberoastable account (crackable service ticket)"
-                      : L"AS-REP roastable (Kerberos pre-auth not required)");
+                      : L"AS-REP roastable (Kerberos pre-auth not required)",
+                L"use a gMSA or a long random password, and require Kerberos pre-auth");
     }
 }
 

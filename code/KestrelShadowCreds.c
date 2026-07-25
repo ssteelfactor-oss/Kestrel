@@ -203,7 +203,8 @@ KestrelRunShadowCredScan(_In_z_ LPCWSTR pwszDomainNC)
             KestrelAddFinding(bAdmin ? KESTREL_SEV_HIGH : KESTREL_SEV_MEDIUM,
                 L"Shadow Creds", wszSam[0] ? wszSam : L"(unknown)",
                 bAdmin ? L"key credential on a Tier-0 account (shadow-credential takeover)"
-                       : L"key credential on a user/service account (review)");
+                       : L"key credential on a user/service account (review)",
+                L"clear msDS-KeyCredentialLink on the account and investigate who wrote it");
 
         /* Decode each key credential. */
         if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch,

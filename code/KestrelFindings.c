@@ -23,6 +23,7 @@ typedef struct _KESTREL_FINDING_ROW {
     WCHAR            wszCategory[48];
     WCHAR            wszObject[200];
     WCHAR            wszDetail[200];
+    WCHAR            wszRemediation[256];
 } KESTREL_FINDING_ROW;
 
 static KESTREL_FINDING_ROW *g_rgFindings = NULL;
@@ -34,7 +35,8 @@ KestrelAddFinding(
     _In_   KESTREL_SEVERITY sev,
     _In_z_ LPCWSTR          pwszCategory,
     _In_z_ LPCWSTR          pwszObject,
-    _In_z_ LPCWSTR          pwszDetail)
+    _In_z_ LPCWSTR          pwszDetail,
+    _In_opt_z_ LPCWSTR      pwszRemediation)
 {
     KESTREL_FINDING_ROW *pRow;
 
@@ -58,6 +60,8 @@ KestrelAddFinding(
                    pwszObject ? pwszObject : L"");
     StringCchCopyW(pRow->wszDetail, ARRAYSIZE(pRow->wszDetail),
                    pwszDetail ? pwszDetail : L"");
+    StringCchCopyW(pRow->wszRemediation, ARRAYSIZE(pRow->wszRemediation),
+                   pwszRemediation ? pwszRemediation : L"");
 }
 
 static LPCWSTR
@@ -104,6 +108,8 @@ KestrelPrintFindingSummary(VOID)
             r->wszObject,
             (r->wszObject[0] && r->wszDetail[0]) ? L" — " : L"",
             r->wszDetail);
+        if (r->wszRemediation[0])
+            wprintf(L"                          → fix: %s\n", r->wszRemediation);
     }
 
     wprintf(L"\n  [=] %lu critical · %lu high · %lu medium · %lu low · %lu info\n",

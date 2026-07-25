@@ -76,7 +76,8 @@ VOID KestrelAddFinding(
     _In_ KESTREL_SEVERITY sev,
     _In_z_ LPCWSTR pwszCategory,
     _In_z_ LPCWSTR pwszObject,
-    _In_z_ LPCWSTR pwszDetail);
+    _In_z_ LPCWSTR pwszDetail,
+    _In_opt_z_ LPCWSTR pwszRemediation);
 VOID KestrelPrintFindingSummary(VOID);
 VOID KestrelFreeFindings(VOID);
 

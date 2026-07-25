@@ -304,7 +304,8 @@ static void _GppScanXml(_In_z_ LPCWSTR pwszPath, _Inout_ KESTREL_GPP_SCAN_RESULT
                 StringCchCopyW(f.wszPassword, ARRAYSIZE(f.wszPassword), wszPwd);
                 f.bDecrypted = TRUE;
                 KestrelAddFinding(KESTREL_SEV_CRITICAL, L"GPP", pwszPath,
-                    L"recoverable cpassword in SYSVOL (MS14-025)");
+                    L"recoverable cpassword in SYSVOL (MS14-025)",
+                L"delete the GPP preference and change the exposed password (cpassword cannot be fixed in place)");
             } else {
                 StringCchCopyW(f.wszPassword, ARRAYSIZE(f.wszPassword), L"(decrypt failed)");
             }

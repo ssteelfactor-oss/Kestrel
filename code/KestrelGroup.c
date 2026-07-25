@@ -678,7 +678,8 @@ KestrelTransitiveMembership(
                             pRes->wszGroupName,
                             pMember->wszSid[0] ? pMember->wszSid : pMember->wszDN);
                     KestrelAddFinding(KESTREL_SEV_MEDIUM, L"FSP", pRes->wszGroupName,
-                        L"unresolvable foreign trustee in a privileged group (stale or external-forest SID)");
+                        L"unresolvable foreign trustee in a privileged group (stale or external-forest SID)",
+                L"remove the stale foreign SID from the privileged group");
                 }
             }
         }

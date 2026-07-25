@@ -103,7 +103,8 @@ _AdfsReportDkmDacl(_In_z_ LPCWSTR pwszDN, _In_ PSECURITY_DESCRIPTOR pSD)
                         L"(Golden SAML precondition)\n", pwszDN, s);
             cHit++;
             KestrelAddFinding(KESTREL_SEV_CRITICAL, L"AD FS", pwszDN,
-                L"read access to the DKM key (Golden SAML precondition)");
+                L"read access to the DKM key (Golden SAML precondition)",
+                L"remove non-default read ACEs on the DKM object (dsacls) and rotate the AD FS token-signing certificate");
         }
         LocalFree(s);
     }

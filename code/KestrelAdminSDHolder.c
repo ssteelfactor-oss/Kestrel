@@ -300,7 +300,8 @@ KestrelRunAdminSDHolderScan(_In_z_ LPCWSTR pwszDomainNC)
         wprintf(L"\n  [ORPHAN] %-24s (%s)  adminCount=1, not in any protected group\n",
                 wszSam[0] ? wszSam : L"(unknown)", wszClass[0] ? wszClass : L"?");
         KestrelAddFinding(KESTREL_SEV_MEDIUM, L"AdminSDHolder", wszSam,
-            L"orphaned adminCount=1 — residual privileged posture (SDProp no longer protects it)");
+            L"orphaned adminCount=1 — residual privileged posture (SDProp no longer protects it)",
+                L"clear adminCount and re-enable inheritance, or return the object to its protected group");
         cOrphan++;
 
         if (wszDN[0]) {

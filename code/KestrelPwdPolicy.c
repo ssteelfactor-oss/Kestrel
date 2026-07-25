@@ -110,7 +110,8 @@ _ReportDefaultPolicy(_In_ IDirectorySearch *pS, _In_ ADS_SEARCH_HANDLE h)
             wprintf(L"      [SPRAY-SAFE] account lockout is DISABLED (threshold=0) — password spraying is unthrottled\n");
         if (lLockout == 0)
             KestrelAddFinding(KESTREL_SEV_MEDIUM, L"Password Policy", L"domain default policy",
-                L"account lockout disabled (threshold=0) — password spraying is unthrottled");
+                L"account lockout disabled (threshold=0) — password spraying is unthrottled",
+                L"set an account lockout threshold in the Default Domain Policy");
         if (lMinLen < 8)
             wprintf(L"      [WEAK] minimum password length is %ld\n", lMinLen);
         if (!bComplex)
