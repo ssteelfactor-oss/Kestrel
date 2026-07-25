@@ -193,6 +193,14 @@ KestrelRunMachineAcctScan(_In_z_ LPCWSTR pwszDomainNC)
                     L"Domain Controller ***\n");
         if (bAdminCreator)
             wprintf(L"        (creator is an administrator — normal provisioning)\n");
+        if (!bAdminCreator)
+            KestrelAddFinding(
+                bIsDC ? KESTREL_SEV_CRITICAL : (cSpn && bEnabled) ? KESTREL_SEV_HIGH
+                                                                  : KESTREL_SEV_LOW,
+                L"Machine Acct", wszSam[0] ? wszSam : wszCreator,
+                bIsDC ? L"created via quota and claims to be a Domain Controller"
+                      : (cSpn && bEnabled) ? L"created via quota, enabled, with SPNs"
+                                           : L"created via quota by a non-admin");
 
         /* When did the identity attributes last change, and from which DSA?
            dNSHostName / SPN rewrites are the Certifried-class manipulation. */

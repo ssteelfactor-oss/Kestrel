@@ -61,6 +61,25 @@
 
 #define KESTREL_VERSION L"0.7-dev"
 
+/* ── Prioritized findings registry ─────────────────────────────────────────
+ * Modules register the findings that matter alongside their normal output;
+ * main prints one severity-sorted triage table at the end of the run. */
+typedef enum _KESTREL_SEVERITY {
+    KESTREL_SEV_INFO = 0,
+    KESTREL_SEV_LOW,
+    KESTREL_SEV_MEDIUM,
+    KESTREL_SEV_HIGH,
+    KESTREL_SEV_CRITICAL
+} KESTREL_SEVERITY;
+
+VOID KestrelAddFinding(
+    _In_ KESTREL_SEVERITY sev,
+    _In_z_ LPCWSTR pwszCategory,
+    _In_z_ LPCWSTR pwszObject,
+    _In_z_ LPCWSTR pwszDetail);
+VOID KestrelPrintFindingSummary(VOID);
+VOID KestrelFreeFindings(VOID);
+
 typedef struct _KESTREL_CONFIG {
     /* Modules */
     BOOL bRunADWS;

@@ -91,6 +91,8 @@ _SddlGrantsLowPriv(_In_z_ LPCWSTR pwszSddl, _In_z_ LPCWSTR pwszClass)
             if (_IsLowPrivSid(s)) {
                 if (!bHit)
                     wprintf(L"  [SCHEMA] class \"%s\" — defaultSecurityDescriptor grants:\n", pwszClass);
+                    KestrelAddFinding(KESTREL_SEV_CRITICAL, L"Schema", pwszClass,
+                        L"defaultSecurityDescriptor grants control to a low-privilege principal");
                 wprintf(L"        %s : 0x%08lX  (new %s objects born controllable)\n",
                         s, (unsigned long)mask, pwszClass);
                 bHit = TRUE;

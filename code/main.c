@@ -679,8 +679,12 @@ int wmain(int argc, wchar_t *argv[])
         }
     }
 
+    /* One severity-sorted triage table across every scan that ran. */
+    KestrelPrintFindingSummary();
+
 Cleanup:
     KTRACE(L"Cleanup...");
+    KestrelFreeFindings();
     KestrelFreeACLScanResult(pACL);
     KestrelFreeGroupScanResult(pGroup);
     KestrelFreeDelegScanResult(pDeleg);

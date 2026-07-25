@@ -316,6 +316,9 @@ KestrelTagHighValue(_Inout_ KESTREL_GRAPH *pGraph)
                 bHV = TRUE;
                 wprintf(L"  [ENTRA-SYNC] %s tagged Tier-0 (Entra Connect sync account — DCSync on domain)\n",
                         pN->wszLabel[0] ? pN->wszLabel : pN->wszSid);
+                KestrelAddFinding(KESTREL_SEV_HIGH, L"Entra Sync",
+                    pN->wszLabel[0] ? pN->wszLabel : pN->wszSid,
+                    L"Entra Connect sync account holds DCSync on the domain (Tier-0)");
             }
         }
 

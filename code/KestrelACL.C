@@ -207,6 +207,12 @@ _CheckDaclHygiene(_In_ PACL pDacl, _In_z_ LPCWSTR pwszDN)
                 if (bDenyAce && (dwMask & KESTREL_HIDE_READ_MASK) && _HygieneBroadSid(s))
                     wprintf(L"  [HIDDEN] %s — deny-read ACE for %s (object hidden from enumeration)\n",
                             pwszDN, s);
+                if (bDenyAce && (dwMask & KESTREL_HIDE_READ_MASK) && _HygieneBroadSid(s)) {
+                    wprintf(L"  [HIDDEN] %s — deny-read ACE for %s (object hidden from enumeration)\n",
+                            pwszDN, s);
+                    KestrelAddFinding(KESTREL_SEV_HIGH, L"Persistence", pwszDN,
+                        L"object hidden from enumeration via a broad deny-read ACE");
+                }
 
                 LocalFree(s);
             }
@@ -914,6 +920,8 @@ _CheckReanimateRights(_In_z_ LPCWSTR pwszDomainNC)
                 else
                     wprintf(L"  [REANIMATE] %s — DS-Reanimate-Tombstones on domain head "
                             L"(can resurrect deleted objects)\n", s);
+                KestrelAddFinding(KESTREL_SEV_HIGH, L"Delegation", pwszDomainNC,
+                    L"non-default principal can reanimate tombstones (restore-to-persist)");
             }
             LocalFree(s);
         }

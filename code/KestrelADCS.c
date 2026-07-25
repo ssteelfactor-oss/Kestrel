@@ -495,6 +495,9 @@ static HRESULT _AdcsScanTemplates(_In_ IDirectorySearch *pSearch,
                                 L"(long-lived cert persistence)\n",
                                 f.wszName[0] ? f.wszName : L"?", years);
                         pResult->cLongValidity++;
+                        KestrelAddFinding(KESTREL_SEV_MEDIUM, L"AD CS",
+                            f.wszName[0] ? f.wszName : L"(template)",
+                            L"certificate validity over 5 years (long-lived cert persistence)");
                     }
                 }
                 pSearch->lpVtbl->FreeColumn(pSearch, &col);
@@ -713,6 +716,8 @@ _AdcsAuditNTAuth(_In_ IDirectorySearch *pSearch,
                         wprintf(L"  [NTAUTH-ROGUE] NTAuth CA not published as an Enterprise CA "
                                 L"— SHA1 %s (possible forge-any-user persistence)\n", t);
                         pResult->cNtauthRogue++;
+                        KestrelAddFinding(KESTREL_SEV_CRITICAL, L"AD CS", L"NTAuth store",
+                            L"holds a CA not published as an Enterprise CA — possible rogue-CA persistence");
                     }
                 }
             }

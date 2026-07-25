@@ -102,6 +102,8 @@ _AdfsReportDkmDacl(_In_z_ LPCWSTR pwszDN, _In_ PSECURITY_DESCRIPTOR pSD)
                 wprintf(L"  [ADFS-DKM] %s: %s has read access to the DKM key "
                         L"(Golden SAML precondition)\n", pwszDN, s);
             cHit++;
+            KestrelAddFinding(KESTREL_SEV_CRITICAL, L"AD FS", pwszDN,
+                L"read access to the DKM key (Golden SAML precondition)");
         }
         LocalFree(s);
     }
