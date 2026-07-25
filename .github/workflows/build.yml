@@ -1,0 +1,41 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  msbuild:
+    name: Release x64 (MSVC)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # The project is authored against PlatformToolset v145 (a very recent VS).
+      # GitHub's hosted runners ship VS 2022 (v143), so we pin v143 here: Kestrel
+      # is portable C and compiles identically on either toolset. If you would
+      # rather have CI validate the exact v145 build, drop the /p:PlatformToolset
+      # override below and use a self-hosted runner that has v145 installed.
+      - name: Build (Release x64)
+        run: >
+          msbuild Kestrel.vcxproj
+          /m
+          /p:Configuration=Release
+          /p:Platform=x64
+          /p:PlatformToolset=v143
+          /verbosity:minimal
+
+      - name: Publish binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kestrel-Release-x64
+          path: x64/Release/Kestrel.exe
+          if-no-files-found: warn
