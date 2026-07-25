@@ -59,7 +59,7 @@
 #define KESTREL_STALE_DAYS          90
 #define KESTREL_FT_PER_DAY          (10000000ULL * 86400ULL)
 
-#define KESTREL_VERSION L"0.7-dev"
+#define KESTREL_VERSION L"1.0"
 
 /* ── Prioritized findings registry ─────────────────────────────────────────
  * Modules register the findings that matter alongside their normal output;
