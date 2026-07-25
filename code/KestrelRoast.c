@@ -369,6 +369,12 @@ _RoastPrintSection(
         else
             wprintf(L"  %-32s  %-9s  %-10s  %-6s\n",
                     pF->wszSAM, wszPwdAge, wszLLAge, pwszRisk);
+
+        if (pF->Risk == ROAST_RISK_HIGH)
+            KestrelAddFinding(KESTREL_SEV_HIGH, bKerb ? L"Kerberoast" : L"AS-REP",
+                pF->wszSAM,
+                bKerb ? L"high-risk Kerberoastable account (crackable service ticket)"
+                      : L"AS-REP roastable (Kerberos pre-auth not required)");
     }
 }
 

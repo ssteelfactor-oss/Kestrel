@@ -226,6 +226,9 @@ KestrelRunSidHistoryScan(
         cls = _ClassOf(pSearch, hSearch);
 
         wprintf(L"\n  [SH] %-24s\n", wszSam[0] ? wszSam : L"(unknown)");
+        KestrelAddFinding(KESTREL_SEV_MEDIUM, L"SID History",
+            wszSam[0] ? wszSam : L"(unknown)",
+            L"populated sIDHistory (review for privileged or foreign SIDs)");
 
         if (SUCCEEDED(pSearch->lpVtbl->GetColumn(pSearch, hSearch, (LPWSTR)L"sIDHistory", &col))) {
             if (col.dwADsType == ADSTYPE_OCTET_STRING) {

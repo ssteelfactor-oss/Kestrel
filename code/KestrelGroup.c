@@ -673,10 +673,13 @@ KestrelTransitiveMembership(
                     wprintf(L"  [FSP] %s: foreign trustee %s\\%s (%s)\n",
                             pRes->wszGroupName, dm, nm,
                             pMember->wszSid[0] ? pMember->wszSid : L"?");
-                else
+                else {
                     wprintf(L"  [FSP] %s: foreign trustee %s [UNRESOLVABLE — stale or external-forest SID]\n",
                             pRes->wszGroupName,
                             pMember->wszSid[0] ? pMember->wszSid : pMember->wszDN);
+                    KestrelAddFinding(KESTREL_SEV_MEDIUM, L"FSP", pRes->wszGroupName,
+                        L"unresolvable foreign trustee in a privileged group (stale or external-forest SID)");
+                }
             }
         }
 
@@ -1019,4 +1022,4 @@ KestrelFreeGroupScanResult(
         p = pNext;
     }
     HeapFree(GetProcessHeap(), 0, pResult);
-}
+}

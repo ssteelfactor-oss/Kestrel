@@ -2413,6 +2413,10 @@ DWORD KestrelAnalyzeDCSync(
 
         wprintf(L"  %-64s  %-10s  %s\n",
             entries[i].wszSid, pwszStatus, wszRights);
+
+        if (!bExpected && (entries[i].dwRights & DCSYNC_RIGHT_CHANGES_ALL))
+            KestrelAddFinding(KESTREL_SEV_CRITICAL, L"DCSync", entries[i].wszSid,
+                L"non-default principal can replicate directory changes (DCSync)");
     }
 
     if (cCritical > 0) {
