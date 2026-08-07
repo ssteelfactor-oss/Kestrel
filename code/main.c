@@ -23,6 +23,10 @@
  *   --machines     Machine accounts created via MachineAccountQuota (mS-DS-CreatorSID)
  *   --gpp          SYSVOL secret sweep — GPP cpassword + unattend + script creds
  *
+ *   Service posture (passive, opt-in — not part of --all):
+ *   --services     Run all service-posture modules
+ *   --exchange     Exchange posture from AD (inventory + Exchange-to-DA escalation)
+ *
  * Output:
  *   --report <path>  Generate report (.html / .json / .yaml)
  *
@@ -57,7 +61,7 @@ KestrelPrintHelp(VOID)
         L"USAGE:\n"
         L"  Kestrel.exe [modules] [output] [options]\n\n"
         L"MODULES (default: all):\n"
-        L"  --all          Run all modules\n"
+        L"  --all          Run all core AD modules (service posture is opt-in; see below)\n"
         L"  --adws         ADWS endpoint detection (port 9389/TCP per DC)\n"
         L"  --topology     Computer topology via SPN decoding\n"
         L"  --delegation   Delegation risks (unconstrained/constrained/S4U2Self)\n"
@@ -82,6 +86,9 @@ KestrelPrintHelp(VOID)
         L"  --adfs         AD FS DKM key ACL audit (Golden SAML precondition)\n"
         L"  --machines     Machine accounts created via MachineAccountQuota (mS-DS-CreatorSID)\n"
         L"  --gpp          SYSVOL secret sweep (GPP cpassword + unattend + script creds)\n\n"
+        L"SERVICE POSTURE (passive, opt-in \u2014 NOT included in --all):\n"
+        L"  --services     Run all service-posture modules\n"
+        L"  --exchange     Exchange posture from AD (inventory + Exchange-to-DA escalation)\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n"
         L"  --opengraph <path>  Export BloodHound CE OpenGraph JSON\n"
@@ -130,6 +137,18 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunADFS       = TRUE;
     pCfg->bRunMachineAcct = TRUE;
     pCfg->bRunGPP        = TRUE;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+/*  Enable every service-posture module — shared by --services                 */
+/*  (passive audit of services AD knows about; opt-in, NOT part of --all)       */
+/* ─────────────────────────────────────────────────────────────────────────── */
+
+static VOID
+KestrelEnableAllServices(_Inout_ KESTREL_CONFIG *pCfg)
+{
+    pCfg->bRunExchange   = TRUE;
+    /* future service-posture modules land here: SCCM, SQL, DNS, hybrid seam */
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -207,6 +226,11 @@ KestrelParseArgs(
         /* ── Modules ─────────────────────────────────────────────── */
         if (_wcsicmp(arg, L"--all") == 0) {
             KestrelEnableAllModules(pCfg);
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--services") == 0) {
+            KestrelEnableAllServices(pCfg);
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -325,6 +349,11 @@ KestrelParseArgs(
             pCfg->bExplicitModules = TRUE;
             continue;
         }
+        if (_wcsicmp(arg, L"--exchange") == 0) {
+            pCfg->bRunExchange = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
         if (_wcsicmp(arg, L"--machines") == 0) {
             pCfg->bRunMachineAcct = TRUE;
             pCfg->bExplicitModules = TRUE;
@@ -342,7 +371,10 @@ KestrelParseArgs(
         return FALSE;
     }
 
-    /* Default: run all modules if none specified */
+    /* Default: run all CORE AD modules if none specified.
+       Service-posture modules are opt-in (--services / --exchange) and are
+       never enabled by the no-args default or by --all, so v1.0 pipeline
+       behaviour is unchanged. */
     if (!pCfg->bExplicitModules)
         KestrelEnableAllModules(pCfg);
 
@@ -597,6 +629,13 @@ int wmain(int argc, wchar_t *argv[])
         hr = KestrelRunADFSDkmScan(wszDomainNC);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunADFSDkmScan failed: 0x%08X\n", hr);
+    }
+
+    if (cfg.bRunExchange) {
+        wprintf(L"\n═══ Kestrel — Exchange Posture ═══\n");
+        hr = KestrelRunExchangeScan(wszConfigNC, wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunExchangeScan failed: 0x%08X\n", hr);
     }
 
     /* ── machine accounts created through MachineAccountQuota ────── */

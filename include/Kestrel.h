@@ -103,6 +103,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunSchemaAudit; /* schema defaultSecurityDescriptor audit */
     BOOL bRunADFS;        /* v0.17 AD FS DKM key ACL audit          */
     BOOL bRunMachineAcct; /* machine accounts created via MAQ        */
+    BOOL bRunExchange;    /* v1.1 passive Exchange posture from AD    */
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
@@ -874,6 +875,13 @@ VOID KestrelFreeADCSScanResult(
  * non-default read grants on the DKM key; silently no-ops if AD FS absent. */
 _Must_inspect_result_
 HRESULT KestrelRunADFSDkmScan(
+    _In_z_ LPCWSTR pwszDomainNC);
+
+/* Passive Exchange posture from AD: server inventory + EOL versions, and the
+ * Exchange-to-DA escalation path (Exchange group rights on the domain object). */
+_Must_inspect_result_
+HRESULT KestrelRunExchangeScan(
+    _In_z_ LPCWSTR pwszConfigNC,
     _In_z_ LPCWSTR pwszDomainNC);
 
 /* Machine accounts carrying mS-DS-CreatorSID — the durable footprint of

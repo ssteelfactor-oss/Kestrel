@@ -132,6 +132,7 @@
     <ClCompile Include="code\KestrelADCS.c" />
     <ClCompile Include="code\KestrelADFS.c" />
     <ClCompile Include="code\KestrelMachineAcct.c" />
+    <ClCompile Include="code\KestrelExchange.c" />
     <ClCompile Include="code\KestrelFindings.c" />
     <ClCompile Include="code\KestrelAdminSDHolder.c" />
     <ClCompile Include="code\KestrelBaseline.c" />
