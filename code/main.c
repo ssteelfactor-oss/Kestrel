@@ -26,6 +26,7 @@
  *   Service posture (passive, opt-in — not part of --all):
  *   --services     Run all service-posture modules
  *   --exchange     Exchange posture from AD (inventory + Exchange-to-DA escalation)
+ *   --sql          SQL Server posture from AD (MSSQLSvc SPN map + risky service accounts)
  *
  * Output:
  *   --report <path>  Generate report (.html / .json / .yaml)
@@ -88,7 +89,8 @@ KestrelPrintHelp(VOID)
         L"  --gpp          SYSVOL secret sweep (GPP cpassword + unattend + script creds)\n\n"
         L"SERVICE POSTURE (passive, opt-in \u2014 NOT included in --all):\n"
         L"  --services     Run all service-posture modules\n"
-        L"  --exchange     Exchange posture from AD (inventory + Exchange-to-DA escalation)\n\n"
+        L"  --exchange     Exchange posture from AD (inventory + Exchange-to-DA escalation)\n"
+        L"  --sql          SQL Server posture from AD (MSSQLSvc SPN map + risky service accounts)\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n"
         L"  --opengraph <path>  Export BloodHound CE OpenGraph JSON\n"
@@ -148,7 +150,8 @@ static VOID
 KestrelEnableAllServices(_Inout_ KESTREL_CONFIG *pCfg)
 {
     pCfg->bRunExchange   = TRUE;
-    /* future service-posture modules land here: SCCM, SQL, DNS, hybrid seam */
+    pCfg->bRunSql        = TRUE;
+    /* future service-posture modules land here: SCCM, DNS, hybrid seam */
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -351,6 +354,11 @@ KestrelParseArgs(
         }
         if (_wcsicmp(arg, L"--exchange") == 0) {
             pCfg->bRunExchange = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--sql") == 0) {
+            pCfg->bRunSql = TRUE;
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -636,6 +644,13 @@ int wmain(int argc, wchar_t *argv[])
         hr = KestrelRunExchangeScan(wszConfigNC, wszDomainNC);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunExchangeScan failed: 0x%08X\n", hr);
+    }
+
+    if (cfg.bRunSql) {
+        wprintf(L"\n═══ Kestrel — SQL Server Posture ═══\n");
+        hr = KestrelRunSqlScan(wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunSqlScan failed: 0x%08X\n", hr);
     }
 
     /* ── machine accounts created through MachineAccountQuota ────── */

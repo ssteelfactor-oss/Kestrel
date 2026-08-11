@@ -150,11 +150,7 @@ _ExchInventory(_In_z_ LPCWSTR pwszConfigNC)
                     else if (col.dwADsType == ADSTYPE_DN_STRING)
                         StringCchCopyW(wszSerial, ARRAYSIZE(wszSerial), col.pADsValues[0].DNString);
                 }
-                wprintf(L"  [EXCH-DBG] serialNumber type=%lu nvals=%lu val='%s'\n",
-                    (unsigned long)col.dwADsType, (unsigned long)col.dwNumValues, wszSerial);
                 pS->lpVtbl->FreeColumn(pS, &col);
-            } else {
-                wprintf(L"  [EXCH-DBG] serialNumber not read (GetColumn hr=0x%08X)\n", (unsigned)hrc);
             }
         }
         if (SUCCEEDED(pS->lpVtbl->GetColumn(pS, h, (LPWSTR)L"msExchCurrentServerRoles", &col))) {
@@ -236,8 +232,12 @@ _ExchDomainEscalation(_In_z_ LPCWSTR pwszDomainNC)
             rgSid[i] = rgSidBuf[i];
     }
     for (i = 0; i < ARRAYSIZE(rgGroups); i++) if (rgSid[i]) cResolved++;
-    wprintf(L"  [EXCH-DBG] resolved %d/%d Exchange group SID(s) via LookupAccountName\n",
+    wprintf(L"  [*] Exchange escalation groups: %d of %d present in this domain\n",
             cResolved, (int)ARRAYSIZE(rgGroups));
+    for (i = 0; i < ARRAYSIZE(rgGroups); i++)
+        if (!rgSid[i])
+            wprintf(L"        not present: \"%s\" (absent in this domain \u2014 nothing to check)\n",
+                    rgGroups[i]);
 
     /* Read the domain object's DACL (DACL-only mask, base scope). */
     if (FAILED(StringCchPrintfW(wszPath, ARRAYSIZE(wszPath), L"LDAP://%s", pwszDomainNC)))
@@ -259,18 +259,14 @@ _ExchDomainEscalation(_In_z_ LPCWSTR pwszDomainNC)
 
     if (pS->lpVtbl->GetNextRow(pS, h) == S_OK &&
         pS->lpVtbl->GetColumn(pS, h, (LPWSTR)L"nTSecurityDescriptor", &col) == S_OK) {
-        wprintf(L"  [EXCH-DBG] domain nTSecurityDescriptor read: type=%lu nvals=%lu\n",
-                (unsigned long)col.dwADsType, (unsigned long)col.dwNumValues);
         if (col.dwADsType == ADSTYPE_NT_SECURITY_DESCRIPTOR && col.dwNumValues) {
             PSECURITY_DESCRIPTOR pSD =
                 (PSECURITY_DESCRIPTOR)col.pADsValues[0].SecurityDescriptor.lpValue;
-            PACL pDacl = 0;
+            PACL pDacl = NULL;
             BOOL bPresent = FALSE, bDefault = FALSE;
             if (pSD && IsValidSecurityDescriptor(pSD) &&
                 GetSecurityDescriptorDacl(pSD, &bPresent, &pDacl, &bDefault) && bPresent && pDacl) {
-                WORD a = 0;
-                wprintf(L"  [EXCH-DBG] domain DACL present, %u ACE(s) to scan\n",
-                        (unsigned)pDacl->AceCount);
+                WORD a;
                 for (a = 0; a < pDacl->AceCount; a++) {
                     ACE_HEADER *pAce = NULL;
                     ACCESS_MASK mask;
@@ -303,8 +299,8 @@ _ExchDomainEscalation(_In_z_ LPCWSTR pwszDomainNC)
     }
 
     if (cHits == 0)
-        wprintf(L"  [=] Exchange escalation: no Exchange group holds a dangerous right on the "
-                L"domain object (or the groups did not resolve)\n");
+        wprintf(L"  [=] Exchange escalation: none of the %d present Exchange group(s) holds a "
+                L"dangerous right on the domain object\n", cResolved);
 
     if (h) pS->lpVtbl->CloseSearchHandle(pS, h);
     pS->lpVtbl->Release(pS);
