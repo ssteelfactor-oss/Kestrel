@@ -105,6 +105,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunMachineAcct; /* machine accounts created via MAQ        */
     BOOL bRunExchange;    /* v1.1 passive Exchange posture from AD    */
     BOOL bRunSql;         /* v1.1 passive SQL Server posture from AD  */
+    BOOL bRunSccm;        /* v1.1 passive SCCM/MECM posture from AD   */
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
@@ -889,6 +890,12 @@ HRESULT KestrelRunExchangeScan(
  * instances running under privileged or delegation-enabled domain accounts. */
 _Must_inspect_result_
 HRESULT KestrelRunSqlScan(
+    _In_z_ LPCWSTR pwszDomainNC);
+
+/* Passive SCCM/MECM posture from AD: System Management container ACL (site
+ * server ID + takeover ACEs) + management-point / site inventory. */
+_Must_inspect_result_
+HRESULT KestrelRunSccmScan(
     _In_z_ LPCWSTR pwszDomainNC);
 
 /* Machine accounts carrying mS-DS-CreatorSID — the durable footprint of

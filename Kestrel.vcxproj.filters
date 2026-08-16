@@ -60,6 +60,9 @@
     <ClCompile Include="code\KestrelSQL.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="code\KestrelSCCM.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
     <ClCompile Include="code\KestrelFindings.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
