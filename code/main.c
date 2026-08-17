@@ -26,8 +26,9 @@
  *   Service posture (passive, opt-in — not part of --all):
  *   --services     Run all service-posture modules
  *   --exchange     Exchange posture from AD (inventory + Exchange-to-DA escalation)
- *   --sql          SQL Server posture from AD (MSSQLSvc SPN map + risky service accounts)
+ *   --sql          SQL Server SPN map (manual; not in --services - overlaps --roast)
  *   --sccm         SCCM/MECM posture from AD (System Management container ACL + MP/site map)
+ *   --dns          ADIDNS posture from AD (zone CreateChild ACL + wpad/isatap + DnsAdmins)
  *
  * Output:
  *   --report <path>  Generate report (.html / .json / .yaml)
@@ -91,8 +92,9 @@ KestrelPrintHelp(VOID)
         L"SERVICE POSTURE (passive, opt-in \u2014 NOT included in --all):\n"
         L"  --services     Run all service-posture modules\n"
         L"  --exchange     Exchange posture from AD (inventory + Exchange-to-DA escalation)\n"
-        L"  --sql          SQL Server posture from AD (MSSQLSvc SPN map + risky service accounts)\n"
-        L"  --sccm         SCCM/MECM posture from AD (System Management container ACL + MP/site map)\n\n"
+        L"  --sql          SQL Server SPN map (manual; not in --services - overlaps --roast)\n"
+        L"  --sccm         SCCM/MECM posture from AD (System Management container ACL + MP/site map)\n"
+        L"  --dns          ADIDNS posture from AD (zone CreateChild ACL + wpad/isatap + DnsAdmins)\n\n"
         L"OUTPUT:\n"
         L"  --report <path>  Generate report (.html / .json / .yaml by extension)\n"
         L"  --opengraph <path>  Export BloodHound CE OpenGraph JSON\n"
@@ -152,8 +154,11 @@ static VOID
 KestrelEnableAllServices(_Inout_ KESTREL_CONFIG *pCfg)
 {
     pCfg->bRunExchange   = TRUE;
-    pCfg->bRunSql        = TRUE;
     pCfg->bRunSccm       = TRUE;
+    pCfg->bRunDns        = TRUE;
+    /* --sql is intentionally NOT in the umbrella: its passive AD footprint is
+       only the MSSQLSvc SPN, which --roast already surfaces. Kept as a manual
+       flag until it grows a distinct passive signal. */
     /* future service-posture modules land here: DNS, hybrid seam */
 }
 
@@ -367,6 +372,11 @@ KestrelParseArgs(
         }
         if (_wcsicmp(arg, L"--sccm") == 0) {
             pCfg->bRunSccm = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--dns") == 0) {
+            pCfg->bRunDns = TRUE;
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -666,6 +676,13 @@ int wmain(int argc, wchar_t *argv[])
         hr = KestrelRunSccmScan(wszDomainNC);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunSccmScan failed: 0x%08X\n", hr);
+    }
+
+    if (cfg.bRunDns) {
+        wprintf(L"\n═══ Kestrel — DNS (ADIDNS) Posture ═══\n");
+        hr = KestrelRunDnsScan(wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunDnsScan failed: 0x%08X\n", hr);
     }
 
     /* ── machine accounts created through MachineAccountQuota ────── */

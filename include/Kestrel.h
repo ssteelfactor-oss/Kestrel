@@ -106,6 +106,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunExchange;    /* v1.1 passive Exchange posture from AD    */
     BOOL bRunSql;         /* v1.1 passive SQL Server posture from AD  */
     BOOL bRunSccm;        /* v1.1 passive SCCM/MECM posture from AD   */
+    BOOL bRunDns;         /* v1.1 passive ADIDNS posture from AD      */
     BOOL bRunTrust;     /* v0.7 trust posture audit     */
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
@@ -896,6 +897,12 @@ HRESULT KestrelRunSqlScan(
  * server ID + takeover ACEs) + management-point / site inventory. */
 _Must_inspect_result_
 HRESULT KestrelRunSccmScan(
+    _In_z_ LPCWSTR pwszDomainNC);
+
+/* Passive AD-integrated DNS (ADIDNS) posture: zone DACL CreateChild by broad
+ * principals, dangerous records (wildcard/wpad/isatap), and DnsAdmins members. */
+_Must_inspect_result_
+HRESULT KestrelRunDnsScan(
     _In_z_ LPCWSTR pwszDomainNC);
 
 /* Machine accounts carrying mS-DS-CreatorSID — the durable footprint of

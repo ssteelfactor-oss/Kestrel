@@ -135,6 +135,7 @@
     <ClCompile Include="code\KestrelExchange.c" />
     <ClCompile Include="code\KestrelSQL.c" />
     <ClCompile Include="code\KestrelSCCM.c" />
+    <ClCompile Include="code\KestrelDNS.c" />
     <ClCompile Include="code\KestrelFindings.c" />
     <ClCompile Include="code\KestrelAdminSDHolder.c" />
     <ClCompile Include="code\KestrelBaseline.c" />
