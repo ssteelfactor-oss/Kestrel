@@ -83,6 +83,7 @@ KestrelPrintHelp(VOID)
         L"  --hygiene      Credential hygiene (PASSWD_NOTREQD / DONT_EXPIRE / reversible / desc)\n"
         L"  --gpolateral   GPO local-group → lateral edges (AdminTo/CanRDP/CanPSRemote/ExecuteDCOM)\n"
         L"  --schema       Schema defaultSecurityDescriptor audit (schema-level backdoor)\n"
+        L"  --hardening    Domain hardening flags (dSHeuristics anon access + Pre-Win2000 compat)\n"
         L"  --trust        Domain/forest trust posture audit\n"
         L"  --gmsa         gMSA password reader enumeration\n"
         L"  --adcs         ADCS certificate-template / CA audit (ESC1-5/9)\n"
@@ -143,6 +144,7 @@ KestrelEnableAllModules(_Inout_ KESTREL_CONFIG *pCfg)
     pCfg->bRunADFS       = TRUE;
     pCfg->bRunMachineAcct = TRUE;
     pCfg->bRunGPP        = TRUE;
+    pCfg->bRunHardening  = TRUE;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────── */
@@ -337,6 +339,11 @@ KestrelParseArgs(
         }
         if (_wcsicmp(arg, L"--schema") == 0) {
             pCfg->bRunSchemaAudit = TRUE;
+            pCfg->bExplicitModules = TRUE;
+            continue;
+        }
+        if (_wcsicmp(arg, L"--hardening") == 0) {
+            pCfg->bRunHardening = TRUE;
             pCfg->bExplicitModules = TRUE;
             continue;
         }
@@ -613,6 +620,13 @@ int wmain(int argc, wchar_t *argv[])
         hr = KestrelRunSchemaAuditScan(wszDomainNC);
         if (FAILED(hr))
             wprintf(L"[!] KestrelRunSchemaAuditScan failed: 0x%08X\n", hr);
+    }
+
+    if (cfg.bRunHardening) {
+        wprintf(L"\n═══ Kestrel — Domain Hardening Flags ═══\n");
+        hr = KestrelRunHardeningScan(wszConfigNC, wszDomainNC);
+        if (FAILED(hr))
+            wprintf(L"[!] KestrelRunHardeningScan failed: 0x%08X\n", hr);
     }
 
     /* ── v0.7: domain trust posture audit ────────────────────────── */

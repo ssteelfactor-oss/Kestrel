@@ -152,6 +152,7 @@
     <ClCompile Include="code\KestrelReport.c" />
     <ClCompile Include="code\KestrelRoast.c" />
     <ClCompile Include="code\KestrelSchemaAudit.c" />
+    <ClCompile Include="code\KestrelHardening.c" />
     <ClCompile Include="code\KestrelShadowCreds.c" />
     <ClCompile Include="code\KestrelSidHistory.c" />
     <ClCompile Include="code\KestrelTrust.c" />

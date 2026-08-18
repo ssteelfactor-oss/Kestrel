@@ -24,11 +24,54 @@ typedef struct _KESTREL_FINDING_ROW {
     WCHAR            wszObject[200];
     WCHAR            wszDetail[200];
     WCHAR            wszRemediation[256];
+    WCHAR            wszTechnique[24];   /* MITRE ATT&CK technique ID, or "" */
 } KESTREL_FINDING_ROW;
 
 static KESTREL_FINDING_ROW *g_rgFindings = NULL;
 static DWORD                g_cFindings   = 0;
 static DWORD                g_cCapacity   = 0;
+
+
+/* Map a finding to its MITRE ATT&CK technique from the module category, using
+ * the detail string to disambiguate modules that raise more than one kind of
+ * finding. Returns NULL when there is no clean, defensible mapping (better an
+ * honest gap than a wrong tag). */
+static LPCWSTR
+_TechniqueFor(_In_z_ LPCWSTR cat, _In_opt_z_ LPCWSTR detail)
+{
+    if (_wcsicmp(cat, L"Kerberoast")      == 0) return L"T1558.003"; /* Kerberoasting            */
+    if (_wcsicmp(cat, L"AS-REP")          == 0) return L"T1558.004"; /* AS-REP Roasting          */
+    if (_wcsicmp(cat, L"GPP")             == 0) return L"T1552.006"; /* GPP passwords            */
+    if (_wcsicmp(cat, L"SID History")     == 0) return L"T1134.005"; /* SID-History Injection    */
+    if (_wcsicmp(cat, L"FSP")             == 0) return L"T1134.005"; /* foreign SID in priv group*/
+    if (_wcsicmp(cat, L"AD FS")           == 0) return L"T1606.002"; /* Forge SAML (Golden SAML) */
+    if (_wcsicmp(cat, L"AD CS")           == 0) return L"T1649";     /* Steal/Forge Auth Certs   */
+    if (_wcsicmp(cat, L"Shadow Creds")    == 0) return L"T1556";     /* Modify Auth Process      */
+    if (_wcsicmp(cat, L"Entra Sync")      == 0) return L"T1003.006"; /* DCSync (sync account)    */
+    if (_wcsicmp(cat, L"Password Policy") == 0) return L"T1110";     /* Brute Force              */
+    if (_wcsicmp(cat, L"SCCM")            == 0) return L"T1072";     /* Software Deployment Tools*/
+    if (_wcsicmp(cat, L"AdminSDHolder")   == 0) return L"T1098";     /* Account Manipulation     */
+    if (_wcsicmp(cat, L"Schema")          == 0) return L"T1098";     /* Account Manipulation     */
+    if (_wcsicmp(cat, L"SQL")             == 0) return L"T1558.003"; /* roastable SQL SPN acct   */
+
+    if (_wcsicmp(cat, L"Hardening") == 0)
+        return (detail && wcsstr(detail, L"AdminSDHolder")) ? L"T1098"      /* SDProp exclusion     */
+                                                            : L"T1087.002"; /* anon domain discovery*/
+
+    if (_wcsicmp(cat, L"DNS") == 0)
+        return (detail && wcsstr(detail, L"DnsAdmins")) ? L"T1098"      /* priv group           */
+                                                        : L"T1557";     /* ADIDNS / AiTM        */
+    if (_wcsicmp(cat, L"Exchange") == 0) {
+        if (detail && (wcsstr(detail, L"WriteDACL") || wcsstr(detail, L"DCSync") ||
+                       wcsstr(detail, L"privesc")))
+            return L"T1003.006";                                        /* Exchange-to-DA        */
+        return NULL;   /* EOL exposure is not an ATT&CK technique */
+    }
+    if (_wcsicmp(cat, L"Machine Acct") == 0)
+        return (detail && wcsstr(detail, L"Domain Controller")) ? L"T1207"  /* Rogue DC          */
+                                                                : L"T1136"; /* Create Account    */
+    return NULL;
+}
 
 VOID
 KestrelAddFinding(
@@ -62,6 +105,10 @@ KestrelAddFinding(
                    pwszDetail ? pwszDetail : L"");
     StringCchCopyW(pRow->wszRemediation, ARRAYSIZE(pRow->wszRemediation),
                    pwszRemediation ? pwszRemediation : L"");
+    {
+        LPCWSTR t = _TechniqueFor(pRow->wszCategory, pRow->wszDetail);
+        StringCchCopyW(pRow->wszTechnique, ARRAYSIZE(pRow->wszTechnique), t ? t : L"");
+    }
 }
 
 static LPCWSTR
@@ -102,9 +149,10 @@ KestrelPrintFindingSummary(VOID)
     for (i = 0; i < g_cFindings; i++) {
         const KESTREL_FINDING_ROW *r = &g_rgFindings[i];
         if (r->sev <= KESTREL_SEV_CRITICAL) rgCount[r->sev]++;
-        wprintf(L"  %-9s %-14s %s%s%s\n",
+        wprintf(L"  %-9s %-14s %-11s %s%s%s\n",
             _SevName(r->sev),
             r->wszCategory,
+            r->wszTechnique[0] ? r->wszTechnique : L"-",
             r->wszObject,
             (r->wszObject[0] && r->wszDetail[0]) ? L" — " : L"",
             r->wszDetail);

@@ -111,6 +111,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunGMSA;      /* v0.7 gMSA password readers   */
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
     BOOL bRunGPP;       /* v0.7 GPP cpassword (SYSVOL)   */
+    BOOL bRunHardening; /* v1.1 dSHeuristics + Pre-Win2000 compat */
 
     /* Output */
     WCHAR wszReportPath[512];
@@ -836,6 +837,13 @@ VOID KestrelGraphReportLowToHigh(
  * low-privilege principal (schema-level backdoor persistence). Prints; S_OK. */
 _Must_inspect_result_
 HRESULT KestrelRunSchemaAuditScan(
+    _In_z_ LPCWSTR pwszDomainNC);
+
+/* Domain hardening flags: dSHeuristics anonymous-access / SDProp-exclusion
+ * positions, and Pre-Windows 2000 Compatible Access broad membership. */
+_Must_inspect_result_
+HRESULT KestrelRunHardeningScan(
+    _In_z_ LPCWSTR pwszConfigNC,
     _In_z_ LPCWSTR pwszDomainNC);
 
 /* ════════════════════════════════════════════════════════════════════════════
