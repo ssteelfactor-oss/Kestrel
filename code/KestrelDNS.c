@@ -287,23 +287,52 @@ _DnsAdmins(_In_z_ LPCWSTR pwszDomainNC)
     pS->lpVtbl->Release(pS);
 }
 
+
+/* Forest-root DN from RootDSE, for the forest-wide ForestDnsZones partition.
+ * Falls back to the domain NC on failure (correct in a single-domain forest). */
+static VOID
+_DnsForestRootDN(_In_z_ LPCWSTR pwszDomainNC, _Out_writes_z_(cch) LPWSTR out, _In_ SIZE_T cch)
+{
+    IADs   *pRoot = NULL;
+    VARIANT v;
+    BSTR    attr;
+
+    StringCchCopyW(out, cch, pwszDomainNC);   /* safe default */
+
+    if (FAILED(ADsGetObject(L"LDAP://RootDSE", &IID_IADs, (void **)&pRoot)))
+        return;
+    VariantInit(&v);
+    attr = SysAllocString(L"rootDomainNamingContext");
+    if (SUCCEEDED(pRoot->lpVtbl->Get(pRoot, attr, &v)) && v.vt == VT_BSTR && v.bstrVal)
+        StringCchCopyW(out, cch, v.bstrVal);
+    SysFreeString(attr);
+    VariantClear(&v);
+    pRoot->lpVtbl->Release(pRoot);
+}
+
 _Must_inspect_result_
 HRESULT
 KestrelRunDnsScan(_In_z_ LPCWSTR pwszDomainNC)
 {
-    WCHAR wszC1[700], wszC2[700];
+    WCHAR wszC1[700], wszC2[700], wszC3[700], wszForest[512];
     DWORD cZones = 0, cRisky = 0;
 
     if (!pwszDomainNC) return E_INVALIDARG;
 
     wprintf(L"\n[*] AD-integrated DNS (ADIDNS) posture (passive - from Active Directory only)\n");
 
-    /* Modern application-partition container, then the legacy System location. */
+    _DnsForestRootDN(pwszDomainNC, wszForest, ARRAYSIZE(wszForest));
+
+    /* Domain application partition, forest-wide partition (_msdcs etc.), and the
+       legacy System location. In a single-domain forest wszForest == domain NC. */
     StringCchPrintfW(wszC1, ARRAYSIZE(wszC1), L"CN=MicrosoftDNS,DC=DomainDnsZones,%s", pwszDomainNC);
     StringCchPrintfW(wszC2, ARRAYSIZE(wszC2), L"CN=MicrosoftDNS,CN=System,%s", pwszDomainNC);
+    StringCchPrintfW(wszC3, ARRAYSIZE(wszC3), L"CN=MicrosoftDNS,DC=ForestDnsZones,%s", wszForest);
 
     cZones += _DnsZones(wszC1, &cRisky);
     cZones += _DnsZones(wszC2, &cRisky);
+    if (_wcsicmp(wszForest, pwszDomainNC) != 0)   /* skip duplicate in single-domain forest */
+        cZones += _DnsZones(wszC3, &cRisky);
 
     if (cZones == 0) {
         wprintf(L"  [=] No AD-integrated DNS zones found (DNS may be file-backed or on another partition)\n");
@@ -312,6 +341,8 @@ KestrelRunDnsScan(_In_z_ LPCWSTR pwszDomainNC)
 
     _DnsDangerRecords(wszC1);
     _DnsDangerRecords(wszC2);
+    if (_wcsicmp(wszForest, pwszDomainNC) != 0)
+        _DnsDangerRecords(wszC3);
     _DnsAdmins(pwszDomainNC);
 
     wprintf(L"\n  [=] %lu AD-integrated DNS zone(s), %lu with broad record-creation rights\n",
