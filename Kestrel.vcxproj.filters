@@ -102,6 +102,9 @@
     <ClCompile Include="code\KestrelHardening.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>
+    <ClCompile Include="code\KestrelArchaeology.c">
+      <Filter>Исходные файлы</Filter>
+    </ClCompile>
     <ClCompile Include="code\KestrelGpoLateral.c">
       <Filter>Исходные файлы</Filter>
     </ClCompile>

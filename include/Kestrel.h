@@ -112,6 +112,7 @@ typedef struct _KESTREL_CONFIG {
     BOOL bRunADCS;      /* v0.7 ADCS template/CA audit  */
     BOOL bRunGPP;       /* v0.7 GPP cpassword (SYSVOL)   */
     BOOL bRunHardening; /* v1.1 dSHeuristics + Pre-Win2000 compat */
+    BOOL bRunArchaeology; /* v1.2 orphaned ACEs + stale privileged  */
 
     /* Output */
     WCHAR wszReportPath[512];
@@ -844,6 +845,12 @@ HRESULT KestrelRunSchemaAuditScan(
 _Must_inspect_result_
 HRESULT KestrelRunHardeningScan(
     _In_z_ LPCWSTR pwszConfigNC,
+    _In_z_ LPCWSTR pwszDomainNC);
+
+/* AD archaeology: orphaned dangerous ACEs (dead trustee SID still holding a
+ * dangerous right) and stale privileged accounts (old pwdLastSet). */
+_Must_inspect_result_
+HRESULT KestrelRunArchaeologyScan(
     _In_z_ LPCWSTR pwszDomainNC);
 
 /* ════════════════════════════════════════════════════════════════════════════

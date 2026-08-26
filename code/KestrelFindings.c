@@ -54,6 +54,10 @@ _TechniqueFor(_In_z_ LPCWSTR cat, _In_opt_z_ LPCWSTR detail)
     if (_wcsicmp(cat, L"Schema")          == 0) return L"T1098";     /* Account Manipulation     */
     if (_wcsicmp(cat, L"SQL")             == 0) return L"T1558.003"; /* roastable SQL SPN acct   */
 
+    if (_wcsicmp(cat, L"Archaeology") == 0)
+        return (detail && wcsstr(detail, L"password")) ? L"T1078"   /* stale valid account  */
+                                                       : L"T1098"; /* orphaned ACE manip   */
+
     if (_wcsicmp(cat, L"Hardening") == 0)
         return (detail && wcsstr(detail, L"AdminSDHolder")) ? L"T1098"      /* SDProp exclusion     */
                                                             : L"T1087.002"; /* anon domain discovery*/
