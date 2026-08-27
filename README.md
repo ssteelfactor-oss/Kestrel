@@ -39,8 +39,11 @@ It's not that Kestrel is faster than a graph. It answers questions the graph can
 | **Cleartext & crackable creds** | GPP `cpassword`, `unattend`/`sysprep` secrets and script passwords across SYSVOL, Kerberoastable and AS-REP-roastable accounts, LAPS coverage gaps | `--gpp` · `--roast` · `--laps` |
 | **Cross-domain & hybrid** | Foreign principals in privileged groups, **Entra Connect sync accounts tagged Tier-0**, trust posture, **machine accounts created via MachineAccountQuota** (`mS-DS-CreatorSID`) | `--groups` · `--trust` · `--machines` |
 | **Posture & recon** | Password / PSO policy, `krbtgt` age, LLMNR / NBT-NS / WDigest / NTLMv1 GPO settings, gMSA readers, stale computers, delegation topology | `--pwdpolicy` · `--policy` · `--gmsa` · `--stale` |
+| **Archaeology** | **Orphaned dangerous ACEs** (a right held by a deleted principal - the SID resolves to nobody), **stale privileged accounts** (forgotten, over-privileged, ancient password) | `--archaeology` |
+| **Domain hardening** | `dSHeuristics` anonymous-LDAP / AdminSDHolder-exclusion flags, Pre-Windows 2000 Compatible Access broad membership | `--hardening` |
+| **Service posture** *(read from AD, no packet to the service)* | **Exchange-to-DA escalation & EOL**, **SCCM container takeover & site map**, **ADIDNS zone poisoning** (Authenticated Users can create records) | `--exchange` · `--sccm` · `--dns` |
 
-Twenty-plus checks that are usually spread across a dozen scripts and two languages. Here they're one binary - and they end in a single, severity-sorted verdict.
+Two dozen-plus checks that are usually spread across a dozen scripts and two languages. Here they're one binary - and they end in a single, severity-sorted verdict.
 
 ---
 
@@ -136,6 +139,13 @@ Run `--all`, or select any subset. Full help: `Kestrel.exe --help`.
 | `--stale` | Stale computers via `lastLogonTimestamp` |
 | `--topology` | Computer topology via SPN decoding |
 | `--adws` | ADWS endpoint detection (9389/TCP per DC) |
+| `--archaeology` | Orphaned dangerous ACEs (dead owner, live right) + stale privileged accounts |
+| `--hardening` | Domain hardening flags: `dSHeuristics` anon-access / SDProp exclusion + Pre-Windows 2000 Compatible Access |
+| `--exchange` | Exchange posture: version/EOL + Exchange-to-DA escalation (WriteDACL on the domain) *(service; opt-in)* |
+| `--sccm` | SCCM/MECM posture: `System Management` container ACL + management-point / site map *(service; opt-in)* |
+| `--dns` | AD-integrated DNS (ADIDNS): zone CreateChild DACL + wpad/isatap/wildcard + DnsAdmins *(service; opt-in)* |
+
+**Service posture** (`--exchange` · `--sccm` · `--dns`) is opt-in and **not** part of `--all`; run `--services` for the whole layer. Findings now carry **MITRE ATT&CK** technique tags.
 
 **Output & interop:** `--report <file>` (`.html` / `.json` / `.yaml`) · `--opengraph <file>` (BloodHound CE) · `--diff <snapshot.json>` · `--verbose`.
 
@@ -166,7 +176,9 @@ These are promises, not preferences - the reasons it's safe to run in production
 | v0.17   | ✅ | Cross-domain + hybrid footprint |
 | v0.18   | ✅ | Query hygiene + honest footprint |
 | **v1.0** | ✅ | **Feature-complete: prioritized findings + remediation, CI, Apache 2.0** |
-| v1.1    | 🔲 | Temporal timeline · rogue-DC / DCShadow detection · ADIDNS · defensive-posture pass |
+| **v1.1** | ✅ | **Passive service-posture layer: Exchange · SCCM · ADIDNS · domain hardening · MITRE ATT&CK tags** |
+| **v1.2** | ✅ | **AD archaeology: orphaned dangerous ACEs + stale privileged accounts** |
+| v1.3    | 🔲 | Hybrid seam (Entra Connect / Seamless SSO) · nTDSConnection / DCShadow precondition |
 
 ---
 
